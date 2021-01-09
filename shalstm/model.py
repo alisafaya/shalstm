@@ -86,12 +86,12 @@ class SHALSTM(nn.Module):
 
 
 if __name__ == "__main__":
-    model = SHALSTM(200, 128, 256).cuda()
+    model = SHALSTM(200, 256, 512).cuda()
     inp = torch.randint(200, (257, 8)).cuda()
     
     from .optim import MinTrustLamb
 
-    optim = MinTrustLamb(model.parameters(), lr=1e-4)
+    optim = MinTrustLamb(model.parameters(), lr=1e-3)
 
     model.train()
     new_hidden, new_mems = None, None

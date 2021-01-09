@@ -8,7 +8,7 @@ from .attention import Attention
 
 class FForwardNetwork(nn.Module):
     """Feed forward network or Boom layer as Smerity names it"""
-    def __init__(self, input_size, feedforward_size=None, dropout=0.1, activation=nn.GELU):
+    def __init__(self, input_size, feedforward_size=None, dropout=0.1, activation=nn.GELU()):
         super(FForwardNetwork, self).__init__()
         
         feedforward_size = input_size * 2 if feedforward_size is None else feedforward_size
@@ -16,7 +16,7 @@ class FForwardNetwork(nn.Module):
         self.linear1 = nn.Linear(input_size, feedforward_size)
         self.dropout = nn.Dropout(dropout) if dropout > 0 else False
         self.linear2 = nn.Linear(feedforward_size, input_size)
-        self.activation = activation()
+        self.activation = activation
 
     def forward(self, x):
         
@@ -41,8 +41,8 @@ class LSTMBlock(nn.Module):
         self.fforward = FForwardNetwork(input_size, fforward_size, dropout=dropout)
 
         self.ln_input = nn.LayerNorm(input_size, eps=1e-12)
-        self.ln_queries = nn.LayerNorm(input_size, eps=1e-12)
-        self.ln_values = nn.LayerNorm(input_size, eps=1e-12)
+        self.ln_queries = nn.LayerNorm(input_size, eps=1e-12) if use_attn else None
+        self.ln_values = nn.LayerNorm(input_size, eps=1e-12) if use_attn else None
         self.ln_fforward = nn.LayerNorm(input_size, eps=1e-12)
         self.ln_output = nn.LayerNorm(input_size, eps=1e-12)
         
