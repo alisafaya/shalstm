@@ -29,3 +29,6 @@ data/
 
 # Pytorch binaries
 *.pt
+
+# VSCode
+.vscode/

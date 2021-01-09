@@ -252,10 +252,10 @@ try:
     if args.optimizer == 'adamw':
         optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.wdecay)
     if args.optimizer == 'lamb':
-        from pytorch_lamb import Lamb
-        optimizer = Lamb(params, lr=args.lr, weight_decay=args.wdecay, min_trust=0.25)
+        from src.optim import MinTrustLamb
+        optimizer = MinTrustLamb(params, lr=args.lr, weight_decay=args.wdecay, min_trust=0.25)
 
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.95)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.9)
     
     for epoch in range(1, args.epochs+1):
 
