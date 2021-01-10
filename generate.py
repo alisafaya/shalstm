@@ -33,7 +33,7 @@ def model_save(fn):
         torch.save(model, f)
 
 def model_load(fn):
-    global model, criterion, optimizer
+    global model, optimizer
     with open(fn, 'rb') as f:
         model = torch.load(f)
 

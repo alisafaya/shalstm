@@ -9,25 +9,26 @@ import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 
 import data
-import model
+from shalstm.model import SHALSTM
+from shalstm.optim import MinTrustLamb
 
-from utils import batchify, get_batch, repackage_hidden, zero_hidden
+from utils import batchify, get_batch
 
 parser = argparse.ArgumentParser(description='PyTorch PennTreeBank RNN/LSTM Language Model')
 parser.add_argument('--data', type=str, default='data/penn/',
                     help='location of the data corpus')
-parser.add_argument('--model', type=str, default='LSTM',
-                    help='type of recurrent net (LSTM, QRNN, GRU)')
-parser.add_argument('--emsize', type=int, default=400,
+parser.add_argument('--emsize', type=int, default=1024,
                     help='size of word embeddings')
 parser.add_argument('--memsize', type=int, default=5120,
                     help='size of attention memory')
-parser.add_argument('--nhid', type=int, default=1150,
-                    help='number of hidden units per layer')
+parser.add_argument('--hidden_size', type=int, default=2048,
+                    help='number of hidden units for feedforward network')
 parser.add_argument('--nlayers', type=int, default=3,
                     help='number of layers')
 parser.add_argument('--lr', type=float, default=30,
                     help='initial learning rate')
+parser.add_argument('--gamma', type=float, default=0.95,
+                    help='lr decay value')
 parser.add_argument('--clip', type=float, default=0.25,
                     help='gradient clipping')
 parser.add_argument('--epochs', type=int, default=8000,
@@ -36,25 +37,17 @@ parser.add_argument('--batch_size', type=int, default=80, metavar='N',
                     help='batch size')
 parser.add_argument('--bptt', type=int, default=70,
                     help='sequence length')
-parser.add_argument('--warmup', type=int, default=4000,
+parser.add_argument('--warmup', type=int, default=1000,
                     help='warmup for learning rate')
 parser.add_argument('--cooldown', type=int, default=None,
                     help='cooldown for learning rate')
-parser.add_argument('--accumulate', type=int, default=1,
-                    help='number of batches to accumulate before gradient update')
-parser.add_argument('--dropout', type=float, default=0.4,
+parser.add_argument('--dropout', type=float, default=0.1,
                     help='dropout applied to layers (0 = no dropout)')
-parser.add_argument('--dropouth', type=float, default=0.3,
+parser.add_argument('--dropouth', type=float, default=0.1,
                     help='dropout for rnn layers (0 = no dropout)')
-parser.add_argument('--dropouti', type=float, default=0.65,
-                    help='dropout for input embedding layers (0 = no dropout)')
-parser.add_argument('--dropoute', type=float, default=0.1,
+parser.add_argument('--dropouti', type=float, default=0.1,
                     help='dropout to remove words from embedding layer (0 = no dropout)')
-parser.add_argument('--wdrop', type=float, default=0.0,
-                    help='amount of weight dropout to apply to the RNN hidden to hidden matrix')
 parser.add_argument('--seed', type=int, default=1111,
-                    help='random seed')
-parser.add_argument('--nonmono', type=int, default=5,
                     help='random seed')
 parser.add_argument('--cuda', action='store_false',
                     help='use CUDA')
@@ -63,20 +56,11 @@ parser.add_argument('--log-interval', type=int, default=200, metavar='N',
 randomhash = ''.join(str(time.time()).split('.'))
 parser.add_argument('--save', type=str,  default=randomhash+'.pt',
                     help='path to save the final model')
-parser.add_argument('--alpha', type=float, default=2,
-                    help='alpha L2 regularization on RNN activation (alpha = 0 means no regularization)')
-parser.add_argument('--beta', type=float, default=1,
-                    help='beta slowness regularization applied on RNN activiation (beta = 0 means no regularization)')
 parser.add_argument('--wdecay', type=float, default=1.2e-6,
                     help='weight decay applied to all weights')
 parser.add_argument('--resume', type=str,  default='',
                     help='path of model to resume')
-parser.add_argument('--optimizer', type=str,  default='sgd',
-                    help='optimizer to use (sgd, adam)')
-parser.add_argument('--when', nargs="+", type=int, default=[-1],
-                    help='When (which epochs) to divide the learning rate by 10 - accepts multiple')
 args = parser.parse_args()
-args.tied = True
 
 # Set the random seed manually for reproducibility.
 np.random.seed(args.seed)
@@ -131,7 +115,7 @@ test_data = batchify(corpus.test, test_batch_size, args)
 ntokens = len(corpus.dictionary)
 print('Total number of tokens:', ntokens)
 
-model = model.SHARNN(ntokens, args.emsize, args.nhid, args.nlayers, args.memsize, args.dropout, args.dropouth, args.dropouti)
+model = SHALSTM(ntokens, args.emsize, args.hidden_size, args.nlayers, args.memsize, args.dropouth, args.dropouti, args.dropout)
 
 if args.resume and args.epochs > 0:
     print('Resuming model ...')
@@ -161,12 +145,7 @@ def evaluate(data_source, batch_size=10):
         for i in range(0, data_source.size(0) - 1, args.bptt):
             data, targets = get_batch(data_source, i, args, evaluation=True)
             raw_loss, output, hidden, mems = model(data, hidden=hidden, mems=mems, targets=targets)
-            
             total_loss += len(data) * raw_loss.data
-            if hidden is not None:
-                hidden = repackage_hidden(hidden)
-            if mems is not None:
-                mems = repackage_hidden(mems)
             
     return total_loss.item() / len(data_source)
 
@@ -212,11 +191,6 @@ def train(epoch=0):
 
             scaler.step(optimizer)
             scaler.update()
-            
-            if hidden is not None:
-                hidden = repackage_hidden(hidden)
-            if mems is not None:
-                mems = repackage_hidden(mems)
 
             optimizer.zero_grad()
             losses = []
@@ -235,28 +209,15 @@ def train(epoch=0):
         batch += 1
         i += seq_len
 
-# Loop over epochs.
-lr = args.lr
-best_val_loss = []
-stored_loss = 100000000
-
 # At any point you can hit Ctrl + C to break out of training early.
 try:
-    optimizer = None
-    if args.optimizer == 'sgd':
-        optimizer = torch.optim.SGD(params, lr=args.lr, weight_decay=args.wdecay)
-    if args.optimizer == 'adagrad':
-        optimizer = torch.optim.Adagrad(params, lr=args.lr, weight_decay=args.wdecay)
-    if args.optimizer == 'adam':
-        optimizer = torch.optim.Adam(params, lr=args.lr, weight_decay=args.wdecay)
-    if args.optimizer == 'adamw':
-        optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.wdecay)
-    if args.optimizer == 'lamb':
-        from src.optim import MinTrustLamb
-        optimizer = MinTrustLamb(params, lr=args.lr, weight_decay=args.wdecay, min_trust=0.25)
-
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.9)
+    lr = args.lr
+    best_val_loss = []
+    stored_loss = 100000000
+    optimizer = MinTrustLamb(params, lr=args.lr, weight_decay=args.wdecay, min_trust=0.25)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=args.gamma)
     
+    # Loop over epochs.
     for epoch in range(1, args.epochs+1):
 
         epoch_start_time = time.time()

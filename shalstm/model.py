@@ -96,7 +96,7 @@ if __name__ == "__main__":
     model.train()
     new_hidden, new_mems = None, None
     for i in range(1000):
-        loss, h, new_hidden, new_mems = model(inp[:-1, :], hidden=new_hidden, mems=new_mems, targets=inp[1:, :])
+        loss, h, new_hidden, new_mems = model(inp[:-1, :], targets=inp[1:, :])
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 0.25)
         optim.step()
