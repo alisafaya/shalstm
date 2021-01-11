@@ -37,10 +37,19 @@ class SHALSTM(nn.Module):
 
     def init_weights(self, module):
         if isinstance(module, (nn.Linear, nn.Embedding, nn.LayerNorm)):
-            module.weight.data.normal_(mean=0.0, std=1 / np.sqrt(self.embed_size))
+            module.weight.data.normal_(mean=0.0, std=2 / np.sqrt(self.embed_size))
 
         if isinstance(module, (nn.Linear, nn.LayerNorm)) and module.bias is not None:
             module.bias.data.zero_()
+            
+    def _get_grad_norm(self):
+        total_norm = 0
+        for p in self.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+        total_norm = total_norm ** (1. / 2)
+        return total_norm 
 
     def forward(self, x, hidden=None, mems=None, targets=None):
         """ Input has shape [seq length, batch] """
@@ -91,13 +100,21 @@ if __name__ == "__main__":
     
     from .optim import MinTrustLamb
 
-    optim = MinTrustLamb(model.parameters(), lr=1e-3)
+    optim = MinTrustLamb(model.parameters(), lr=1e-4)
 
     model.train()
     new_hidden, new_mems = None, None
+    
+    grad_history = []
+    
     for i in range(1000):
         loss, h, new_hidden, new_mems = model(inp[:-1, :], targets=inp[1:, :])
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.25)
+        
+        obs_grad_norm = model._get_grad_norm()
+        grad_history.append(obs_grad_norm)
+        grad_history = grad_history[-10:]
+        clip_value = np.mean(grad_history) / 10
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
         optim.step()
-        print(loss.data)
+        print(clip_value, loss.data.item())

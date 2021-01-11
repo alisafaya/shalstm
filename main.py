@@ -23,19 +23,19 @@ parser.add_argument('--memsize', type=int, default=5120,
                     help='size of attention memory')
 parser.add_argument('--hidden_size', type=int, default=2048,
                     help='number of hidden units for feedforward network')
-parser.add_argument('--nlayers', type=int, default=3,
+parser.add_argument('--nlayers', type=int, default=4,
                     help='number of layers')
-parser.add_argument('--lr', type=float, default=30,
+parser.add_argument('--lr', type=float, default=4e-3,
                     help='initial learning rate')
 parser.add_argument('--gamma', type=float, default=0.95,
                     help='lr decay value')
 parser.add_argument('--clip', type=float, default=0.25,
                     help='gradient clipping')
-parser.add_argument('--epochs', type=int, default=8000,
+parser.add_argument('--epochs', type=int, default=30,
                     help='upper epoch limit')
-parser.add_argument('--batch_size', type=int, default=80, metavar='N',
+parser.add_argument('--batch_size', type=int, default=32, metavar='N',
                     help='batch size')
-parser.add_argument('--bptt', type=int, default=70,
+parser.add_argument('--bptt', type=int, default=1024,
                     help='sequence length')
 parser.add_argument('--warmup', type=int, default=1000,
                     help='warmup for learning rate')
@@ -47,11 +47,13 @@ parser.add_argument('--dropouth', type=float, default=0.1,
                     help='dropout for rnn layers (0 = no dropout)')
 parser.add_argument('--dropouti', type=float, default=0.1,
                     help='dropout to remove words from embedding layer (0 = no dropout)')
-parser.add_argument('--seed', type=int, default=1111,
+parser.add_argument('--seed', type=int, default=123,
                     help='random seed')
 parser.add_argument('--cuda', action='store_false',
                     help='use CUDA')
-parser.add_argument('--log-interval', type=int, default=200, metavar='N',
+parser.add_argument('--static_clip', action='store_true',
+                    help='use dynamic gradient clipping')
+parser.add_argument('--log-interval', type=int, default=20, metavar='N',
                     help='report interval')
 randomhash = ''.join(str(time.time()).split('.'))
 parser.add_argument('--save', type=str,  default=randomhash+'.pt',
@@ -149,18 +151,22 @@ def evaluate(data_source, batch_size=10):
             
     return total_loss.item() / len(data_source)
 
+grad_history = []
+history_size = 100
 
 def train(epoch=0):
     # Turn on training mode which enables dropout.
+    global grad_history
+
     total_loss = 0
     start_time = time.time()
     ntokens = len(corpus.dictionary)
     hidden = None
     mems = None
     batch, i = 0, 0
-    loss_every_n_batches = args.accumulate
     losses = []
-
+    clip_value = args.clip
+    
     while i < train_data.size(0) - 1 - 1:
 
         # Warmup
@@ -177,31 +183,33 @@ def train(epoch=0):
         model.train()
         data, targets = get_batch(train_data, i, args, seq_len=seq_len)
         with torch.cuda.amp.autocast(enabled=use_amp):
-            raw_loss, output, hidden, mems = model(data, hidden=hidden, mems=mems, targets=targets)
+            loss, output, hidden, mems = model(data, hidden=hidden, mems=mems, targets=targets)
 
-        losses.append(raw_loss)
+        scaler.scale(loss).backward()
+
+        scaler.unscale_(optimizer)
         
-        if batch % loss_every_n_batches == 0:
-            loss = functools.reduce(lambda x, y: x + y, losses)
-            scaler.scale(loss).backward()
-            
-            if args.clip:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(params, args.clip)
+        if not args.static_clip:
+            obs_grad_norm = model._get_grad_norm()
+            grad_history.append(obs_grad_norm)
+            grad_history = grad_history[-history_size:]
+            clip_value = np.mean(grad_history)  
 
-            scaler.step(optimizer)
-            scaler.update()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
 
-            optimizer.zero_grad()
-            losses = []
+        scaler.step(optimizer)
+        scaler.update()
 
-        total_loss += raw_loss.data
+        optimizer.zero_grad()
+
+        total_loss += loss.data
+
         if batch % args.log_interval == 0 and batch > 0:
             cur_loss = total_loss.item() / args.log_interval
             elapsed = time.time() - start_time
-            print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:05.5f} | ms/batch {:5.2f} | '
+            print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:05.5f} | clip {:05.3f} | ms/batch {:5.2f} | '
                     'loss {:5.2f} | ppl {:8.2f} | bpc {:8.3f}'.format(
-                epoch + 1, batch, len(train_data) // args.bptt, optimizer.param_groups[0]['lr'],
+                epoch + 1, batch, len(train_data) // args.bptt, optimizer.param_groups[0]['lr'], clip_value,
                 elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss), cur_loss / math.log(2)))
             total_loss = 0
             start_time = time.time()
