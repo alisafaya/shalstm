@@ -128,7 +128,7 @@ if args.cuda:
     model = model.cuda()
 
 params = list(model.parameters())
-total_params = sum(x.size()[0] * x.size()[1] if len(x.size()) > 1 else x.size()[0] for x in params if x.size())
+total_params = sum(x.numel() for x in params)
 print('Args:', args)
 print('Model total parameters:', total_params)
 
