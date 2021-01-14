@@ -90,9 +90,13 @@ class SHALSTM(nn.Module):
             return loss, h, new_hidden, new_mems
         else:
             # calculate predictions
-            output = self.ate.predict(h.view(-1, self.embed_size))
+            output = self.ate.log_prob(h.view(-1, self.embed_size))
             return output, h, new_hidden, new_mems
 
+    def generate(self, initial=None):
+        """ initial sequence has shape [seq length, batch] """
+        
+        pass
 
 if __name__ == "__main__":
     model = SHALSTM(200, 256, 512).cuda()

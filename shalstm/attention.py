@@ -35,9 +35,9 @@ class Attention(nn.Module):
         self.ln_query = nn.LayerNorm(hidden_size, eps=1e-12)
 
         # used during evaluation to avoid unnecessary computation
-        self.gated_qs = torch.sigmoid(self.query_gate)
-        self.gated_ks = torch.sigmoid(self.key_gate)
-        self.gated_vs = self.overparameterize(torch.sigmoid(self.value_gate))
+        self.gated_qs = None
+        self.gated_ks = None
+        self.gated_vs = None
 
 
     def attention(self, query, key, value, attn_mask=None):
@@ -61,7 +61,7 @@ class Attention(nn.Module):
     def forward(self, query, key, value, attn_mask=None):
         # (q, k, v)_seq_len, batch_size, hidden_size 
 
-        if self.training:
+        if self.training or self.gated_qs is None:
             # recalculate gates values to update them.
             self.gated_qs, self.gated_ks, self.gated_vs = torch.sigmoid(self.query_gate), torch.sigmoid(self.key_gate), torch.sigmoid(self.value_gate)
             self.gated_vs = self.overparameterize(self.gated_vs)

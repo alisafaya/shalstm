@@ -1,108 +1,37 @@
-import argparse
-import sys
+# coding: utf-8
 
+import argparse
+import functools
+import time
+import math
+import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as checkpoint
+import os
+import hashlib
 
 import data
-
-parser = argparse.ArgumentParser(description='PyTorch PTB Language Model')
-
-# Model parameters.
-parser.add_argument('--data', type=str, default='./data/penn',
-                    help='location of the data corpus')
-parser.add_argument('--checkpoint', type=str, default='./model.pt',
-                    help='model checkpoint to use')
-parser.add_argument('--outf', type=str, default='output.txt',
-                    help='output file for generated text')
-parser.add_argument('--words', type=int, default='1000',
-                    help='number of words to generate')
-parser.add_argument('--seed', type=int, default=1111,
-                    help='random seed')
-parser.add_argument('--cuda', action='store_true',
-                    help='use CUDA')
-parser.add_argument('--temperature', type=float, default=1.0,
-                    help='temperature - higher will increase diversity')
-parser.add_argument('--log-interval', type=int, default=100,
-                    help='reporting interval')
-args = parser.parse_args()
+from shalstm.model import SHALSTM
+from shalstm.optim import MinTrustLamb
 
 def model_save(fn):
     with open(fn, 'wb') as f:
-        #torch.save([model, criterion, optimizer], f)
         torch.save(model, f)
 
 def model_load(fn):
     global model, optimizer
     with open(fn, 'rb') as f:
-        model = torch.load(f)
+        m = torch.load(f)
+        d = m.state_dict()
+        model.load_state_dict(d, strict=False)
 
-model = torch.load(args.checkpoint)
-model.eval()
-
-if args.cuda:
-    model.cuda()
-    model.float()
-else:
-    model.cpu()
-
-import os
-import hashlib
-fn = 'corpus.{}.data'.format(hashlib.md5(args.data.encode()).hexdigest())
-if os.path.exists(fn):
-    print('Loading cached dataset...')
-    corpus = torch.load(fn)
-else:
-    print('Producing dataset...')
-    corpus = data.Corpus(args.data)
-    torch.save(corpus, fn)
-
-dictionary = corpus.dictionary
-del corpus
-ntokens = len(dictionary)
-hidden = None
-mems = None
-
-text = sys.stdin.read()
-
-#import youtokentome as yttm
-#m = 'data/wpwikitext-103/wt103.yttm'
-#bpe = yttm.BPE(model=m)
-#text = ' '.join(bpe.encode(text, output_type=yttm.OutputType.SUBWORD))
-
-#if type(text) == str:
-#    text = text.encode('utf8')
-
-#text = [str(c) if c != ord('\n') else '<eos>' for c in text]
-
-text = [w for w in text.replace('\n', ' <eos> ').split() if w]
-
-maxlen = (2 * 1400) - 1
-maxlen = model.num_max_positions
-text = text[-maxlen:]
-orig = ' '.join(w if w != '<eos>' else '\n' for w in text)
-
-print(text)
-
-text = [dictionary.word2idx[c] for c in text]
-
-print(text)
-
-input = torch.rand(1, 1).mul(ntokens).long()
-print(input.shape)
-
-input = torch.Tensor(text).view(-1, 1).long()
-if args.cuda:
-    input = input.cuda()
-logits, hidden, mems = model(input[:-1, :], hidden, mems=mems, return_h=False)
-input = input[-1:, :]
-# TODO: We lose a token here as we predict one, update the memory, but don't add it to our generated text
-
-def produce_vocab_logits(head_weight, head_bias, hiddens):
-    head_res = torch.nn.functional.linear(hiddens, head_weight, bias=head_bias)
-    #softmaxed_head_res = torch.nn.functional.log_softmax(head_res, dim=-1)
-    #softmaxed_head_res = F.softmax(head_res, dim=-1)
-    return head_res
+def batchify(data, bsz, args):
+    nbatch = data.size(0) // bsz
+    data = data.narrow(0, 0, nbatch * bsz)
+    data = data.view(bsz, -1).t().contiguous()
+    return data
 
 def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, filter_value=-float('Inf')):
     """ Filter a distribution of logits using top-k and/or nucleus (top-p) filtering
@@ -134,32 +63,42 @@ def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, filter_value=-float('Inf')
         logits[indices_to_remove] = filter_value
     return logits
 
-with open(args.outf, 'w') as outf:
-    #outf.write(str(orig.decode('utf8')))
-    outf.write(orig)
-    outf.write('||||')
+fn = 'corpus.{}.data'.format(hashlib.md5("data/enwik8/".encode()).hexdigest())
+if os.path.exists(fn):
+    print('Loading cached dataset...')
+    corpus = torch.load(fn)
+else:
+    print('Producing dataset...')
+    corpus = data.Corpus(args.data)
+    torch.save(corpus, fn)
 
-    for i in range(args.words):
-        with torch.no_grad():
-            logits, hidden, mems = model(input, hidden, mems=mems, return_h=False)
-        # TODO: What if we want to start with no history?
-        #magic_mem = []
-        #for ma, mb in zip(mems, new_mems):
-        #    magic_mem.append(torch.cat([ma, mb], dim=0)[-maxlen:])
-        #mems = magic_mem
-        output = produce_vocab_logits(model.decoder.weight, model.decoder.bias, logits) / args.temperature
-        #output = top_k_top_p_filtering(output.view(-1), top_k=100).view(*output.shape)
+batch_size = 1
+eval_batch_size = 1
+val_data = batchify(corpus.valid, eval_batch_size, 232)
+ntokens = len(corpus.dictionary)
+inpt = val_data[:4096, :].cuda()
+
+model = SHALSTM(ntokens, 1024, 2048)
+model_load("bin/small_model.pt")
+model = model.cuda()
+model.eval()
+
+hidden = None
+mems = None
+output, h,  hidden, mems = model(inpt[:-1], hidden=hidden, mems=mems)
+inp = inpt[-1:, :]
+
+sequence = "".join(list(map(lambda x: chr(int(corpus.dictionary.idx2word[x])) if x != 20 else "\n", inpt.flatten().cpu() )))
+sequence += "|-start-of-generated-text-|"
+
+with torch.no_grad():
+    for i in range(4096):
+        output, h, hidden, mems = model(inp, hidden=hidden, mems=mems)
         output = top_k_top_p_filtering(output.view(-1), top_p=0.98).view(*output.shape)
-        word_weights = F.softmax(output, dim=-1).squeeze()
-        #word_weights = output.squeeze().data.div(args.temperature).exp().cpu()
-        word_idx = torch.multinomial(word_weights, num_samples=1)[0]
-        input.data.fill_(word_idx)
-        word = dictionary.idx2word[word_idx]
+        token_weights = F.softmax(output, dim=-1).squeeze()
+        output_idx = torch.multinomial(token_weights, num_samples=1)[0]
+        inp.data.fill_(output_idx)
+        token = chr(int(corpus.dictionary.idx2word[output_idx])) if output_idx != 20 else "\n"
+        sequence += token
 
-        #outf.write(word + ('\n' if i % 20 == 19 else ' '))
-        #outf.write(chr(int(word)) if word != '<eos>' else '\n')
-        outf.write(word + ' ' if word != '<eos>' else '\n')
-
-        if i % args.log_interval == 0:
-            print('| Generated {}/{} words'.format(i, args.words))
-            print('|| Memory: {}'.format(None if mems is None else mems[0].shape))
+print(sequence)
