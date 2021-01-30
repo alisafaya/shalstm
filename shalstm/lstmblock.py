@@ -8,7 +8,7 @@ from .attention import Attention
 
 class FForwardNetwork(nn.Module):
     """Feed forward network or Boom layer as Smerity names it"""
-    def __init__(self, input_size, feedforward_size=None, dropout=0.1, activation=nn.GELU()):
+    def __init__(self, input_size, feedforward_size=None, dropout=0.1, activation=nn.GELU(), device=torch.device("cpu")):
         super(FForwardNetwork, self).__init__()
         
         feedforward_size = input_size * 2 if feedforward_size is None else feedforward_size
@@ -18,8 +18,11 @@ class FForwardNetwork(nn.Module):
         self.linear2 = nn.Linear(feedforward_size, input_size)
         self.activation = activation
 
+        self.device = device
+        self.to(device)
+
     def forward(self, x):
-        
+        x = x.to(self.device)
         x = self.linear1(x)
         x = self.activation(x)
         
@@ -27,18 +30,17 @@ class FForwardNetwork(nn.Module):
             x = self.dropout(x)
         
         x = self.linear2(x)
-        x = self.activation(x)
         return x
 
 
 class LSTMBlock(nn.Module):
     """LSTM Block (lstm -> attention (optional) -> feedforward network)"""
-    def __init__(self, input_size, fforward_size, dropout=0.1, use_attn=False):
-        super().__init__()
+    def __init__(self, input_size, fforward_size, dropout=0.1, use_attn=False, device=torch.device("cpu")):
+        super(LSTMBlock, self).__init__()
 
         self.lstm = nn.LSTM(input_size=input_size, hidden_size=input_size, batch_first=False)
-        self.attn = Attention(input_size) if use_attn else None
-        self.fforward = FForwardNetwork(input_size, fforward_size, dropout=dropout)
+        self.attn = Attention(input_size, device=device) if use_attn else None
+        self.fforward = FForwardNetwork(input_size, fforward_size, dropout=dropout, device=device)
 
         self.ln_input = nn.LayerNorm(input_size, eps=1e-12)
         self.ln_queries = nn.LayerNorm(input_size, eps=1e-12) if use_attn else None
@@ -48,14 +50,18 @@ class LSTMBlock(nn.Module):
         
         self.dropout = nn.Dropout(dropout) if dropout > 0 else None
 
+        self.device = device
+        self.to(device)
+
     def forward(self, h, attn_mask, memory_size, memory=None, hidden=None):
         # seq_len, batch_size, hidden_size
+        h = h.to(self.device)
 
         # normalize the input of the block
         h = self.ln_input(h)
-        
+
         # pass through lstm
-        lstm_output, lstm_hidden = self.lstm(h, None if hidden is None else hidden)
+        lstm_output, lstm_hidden = self.lstm(h, None if hidden is None else tuple(x.to(self.device) for x in hidden))
         
         # detach hidden
         new_hidden = (lstm_hidden[0].detach(), lstm_hidden[1].detach())
@@ -73,7 +79,7 @@ class LSTMBlock(nn.Module):
             
             if memory is not None:
                 # if previous memory exists, concatenate it
-                values = torch.cat([memory, values], dim=0)
+                values = torch.cat([memory.to(self.device), values], dim=0)
             
             h = self.ln_queries(h)
             queries = h

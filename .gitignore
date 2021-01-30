@@ -22,7 +22,10 @@ venv.bak/
 
 # Data
 data/
+bin/
 *.data
+dist_shared
+runs/
 
 # Logs
 *.log

@@ -28,32 +28,37 @@ class AdaptiveTiedEmbeddings(nn.AdaptiveLogSoftmaxWithLoss):
 
     """
 
+    def __init__(self, *args, device=torch.device("cpu"), **kwargs):
+        super(AdaptiveTiedEmbeddings, self).__init__(*args, **kwargs)
+        self.device = device
+        self.to(device)
+
     def encode(self, input):
 
-        used_rows = 0
+        input = input.to(self.device)
         input_size = list(input.size())
+        used_rows = 0
 
         input = input.view(-1)
-        output = torch.zeros(list(input.size()) + [self.in_features], device=self.head.weight.device)
+        output = torch.zeros(list(input.size()) + [self.in_features], device=self.device)
         cutoff_values = [0] + self.cutoffs
 
         for i in range(len(cutoff_values) - 1):
             low_idx = cutoff_values[i]
             high_idx = cutoff_values[i + 1]
             input_mask = (input >= low_idx) & (input < high_idx)
-            row_indices = input_mask.nonzero().squeeze()
+            row_indices = torch.nonzero(input_mask).squeeze()
 
             if row_indices.numel() == 0:
                 continue
 
             cluster_input = input[input_mask] - low_idx
-
             if i == 0:
                 out = torch.embedding(self.head.weight, cluster_input)
             elif self.div_value == 1:
                 out = torch.embedding(self.tail[i - 1][1].weight, cluster_input)
             else:
-                vector_idx = torch.tensor(self.shortlist_size + i - 1, dtype=torch.long, device=input.device)
+                vector_idx = torch.tensor(self.shortlist_size + i - 1, dtype=torch.long, device=self.device)
                 out = torch.embedding(self.tail[i - 1][1].weight, cluster_input)
                 out = torch.matmul(out, self.tail[i - 1][0].weight) * torch.embedding(self.head.weight, vector_idx)
 
@@ -69,3 +74,10 @@ class AdaptiveTiedEmbeddings(nn.AdaptiveLogSoftmaxWithLoss):
 
         output = output.view(input_size + [self.in_features])
         return output
+
+
+if __name__ == '__main__':
+
+    device = torch.device("cuda:0")
+    adaptive = AdaptiveTiedEmbeddings(128, 512, [32, 128, 256], device=device, div_value=2)
+    print("No of parameters =", sum(x.numel() for x in adaptive.parameters()))

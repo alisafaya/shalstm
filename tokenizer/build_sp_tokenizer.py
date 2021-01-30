@@ -13,5 +13,4 @@ for m, v in (("4k", 2**12), ("8k", 2**13), ("16k", 2**14), ("32k", 2**15)):
         bos_id=-1,
         control_symbols=["<sha_tkn1>", "<sha_tkn2>", "<sha_tkn3>", "<sha_tkn4>", "<sha_tkn5>"],
         shuffle_input_sentence=True,
-        input_sentence_size=10**7,
-        character_coverage=0.995)
+        input_sentence_size=10**7)

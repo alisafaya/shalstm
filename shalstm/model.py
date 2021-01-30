@@ -1,5 +1,6 @@
 import math
 import random
+import json
 import numpy as np
 
 import torch
@@ -10,30 +11,29 @@ from .lstmblock import LSTMBlock
 from .adaptive import AdaptiveTiedEmbeddings
 
 class SHALSTM(nn.Module):
-    def __init__(self, vocab_size, embed_size, hidden_size, no_layers=4, memory_size=5120, dropouti=0.1, dropouth=0.1, dropouto=0.1):
-        super().__init__()
+    def __init__(self, config, device=torch.device("cpu")):
+        super(SHALSTM, self).__init__()
+        self.load_config(config)
 
-        self.embed_size = embed_size
-        self.memory_size = memory_size
-        self.hidden_size = hidden_size
-        self.no_layers = no_layers
-        
-        self.idrop = nn.Dropout(dropouti)
-        self.odrop = nn.Dropout(dropouto)
+        self.idrop = nn.Dropout(self.dropouti)
+        self.odrop = nn.Dropout(self.dropouto)
 
         # Cutoffs list calculation could be better than this
-        start = 4 + int(np.ceil(np.log2(vocab_size / 8) / 2))
-        cutoffs = [ 2**x for x in range(start, start + 5, 2) if vocab_size > 2**x ]
+        start = 4 + int(np.ceil(np.log2(self.vocab_size / 8) / 2))
+        cutoffs = [ 2**x for x in range(start, start + 5, 2) if self.vocab_size > 2**x ]
 
         # used as both encoder and decoder (tied weights)
-        self.ate = AdaptiveTiedEmbeddings(embed_size, vocab_size, cutoffs)
+        self.ate = AdaptiveTiedEmbeddings(self.embed_size, self.vocab_size, cutoffs, device=device)
 
         self.blocks = nn.ModuleList()
-        for idx in range(no_layers):
+        for idx in range(self.no_layers):
             # place only one attention head on the layer before the last layer
-            self.blocks.append(LSTMBlock(embed_size, hidden_size, dropout=dropouth, use_attn=True if idx == no_layers - 2 else False))
+            self.blocks.append(LSTMBlock(self.embed_size, self.hidden_size, dropout=self.dropouth, use_attn=True if idx == self.no_layers - 2 else False, device=device))
 
         self.apply(self.init_weights)
+
+        self.device = device
+        self.to(device)
 
     def init_weights(self, module):
         if isinstance(module, (nn.Linear, nn.Embedding, nn.LayerNorm)):
@@ -41,7 +41,36 @@ class SHALSTM(nn.Module):
 
         if isinstance(module, (nn.Linear, nn.LayerNorm)) and module.bias is not None:
             module.bias.data.zero_()
-            
+
+    def load_config(self, config):
+        if isinstance(config, dict):
+            self.embed_size = config.get("embed_size", 1024)
+            self.memory_size = config.get("memory_size", 4096)
+            self.hidden_size = config.get("hidden_size", 2048)
+            self.no_layers = config.get("no_layers", 4)
+            self.dropouti = config.get("dropouti", 0.1)
+            self.dropouto = config.get("dropouto", 0.1)
+            self.dropouth = config.get("dropouth", 0.1)
+            self.vocab_size = config.get("vocab_size", 2**15)
+        elif isinstance(config, str):
+            config = json.loads(open(config).read())
+            self.load_config(config)
+        else:
+            raise TypeError
+
+    def get_config(self):
+        config = {
+            "embed_size": self.embed_size,
+            "memory_size": self.memory_size,
+            "hidden_size": self.hidden_size,
+            "no_layers": self.no_layers,
+            "dropouti": self.dropouti,
+            "dropouto": self.dropouto,
+            "dropouth": self.dropouth,
+            "vocab_size": self.vocab_size
+        }
+        return config
+
     def _get_grad_norm(self):
         total_norm = 0
         for p in self.parameters():
@@ -51,9 +80,18 @@ class SHALSTM(nn.Module):
         total_norm = total_norm ** (1. / 2)
         return total_norm 
 
+    def _check_grads(self):
+        for p in self.parameters():
+            if p.grad is not None:
+                if (p.grad.data != p.grad.data).any():
+                    return True
+
+        return False 
+
     def forward(self, x, hidden=None, mems=None, targets=None):
         """ Input has shape [seq length, batch] """
-        
+        x = x.to(self.device)
+
         # encode and dropout input
         h = self.ate.encode(x)
         h = self.idrop(h)
@@ -86,7 +124,7 @@ class SHALSTM(nn.Module):
 
         if targets is not None:
             # calculate loss targets are provided
-            loss = self.ate(h.view(-1, self.embed_size), targets.view(-1)).loss
+            loss = self.ate(h.view(-1, self.embed_size), targets.to(self.device).view(-1)).loss
             return loss, h, new_hidden, new_mems
         else:
             # calculate predictions
@@ -95,30 +133,63 @@ class SHALSTM(nn.Module):
 
     def generate(self, initial=None):
         """ initial sequence has shape [seq length, batch] """
-        
-        pass
+
+        raise NotImplementedError
+
+    def save(self, path):
+        state_dict = self.state_dict()
+        for key, value in state_dict.items():
+            state_dict[key] = value.cpu()
+
+        with open(path + ".json", "w") as fo:
+            fo.write(json.dumps(self.get_config(), indent=4))
+        torch.save(state_dict, path + ".pt")
+
+    def load(self, path):
+        state_dict = torch.load(path)
+        for key, value in state_dict.items():
+            state_dict[key] = value.to(self.device)
+
+        self.load_state_dict(state_dict)
+
 
 if __name__ == "__main__":
-    model = SHALSTM(200, 256, 512).cuda()
-    inp = torch.randint(200, (257, 8)).cuda()
-    
+    device = torch.device("cuda:0")
+
+    use_amp = True
+
+    model = SHALSTM("config/small.json", device=device)
+    inp = torch.load(f"/userfiles/asafaya19/pile/train/batch_00001.pt")[:1024*32].long().view(1024, 32).to(device) # input size x batch size
+
     from .optim import MinTrustLamb
 
-    optim = MinTrustLamb(model.parameters(), lr=1e-4)
+    optimizer = MinTrustLamb(model.parameters(), lr=1e-4)
 
     model.train()
-    new_hidden, new_mems = None, None
+    import time
+
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+
+    hidden, mems = None, None
+    starttime = time.time()
+    for i in range(100):
+
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            loss, h, hidden, mems = model(inp[:-1, :], targets=inp[1:, :], hidden=hidden, mems=mems)
+
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+
+        scaler.step(optimizer)
+        scaler.update()
+
+    print("Excecution time =", (time.time() - starttime) / 100, "sec per batch")
+
+    model.save("bin/sample/sample_model")
     
-    grad_history = []
-    
-    for i in range(1000):
-        loss, h, new_hidden, new_mems = model(inp[:-1, :], targets=inp[1:, :])
-        loss.backward()
-        
-        obs_grad_norm = model._get_grad_norm()
-        grad_history.append(obs_grad_norm)
-        grad_history = grad_history[-10:]
-        clip_value = np.mean(grad_history) / 10
-        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
-        optim.step()
-        print(clip_value, loss.data.item())
+    new_model = SHALSTM("bin/sample/sample_model.json", device="cuda:0")
+    new_model.load("bin/sample/sample_model.pt")
+    loss, h, new_hidden, new_mems = new_model(inp[:-1, :], targets=inp[1:, :])
+    print(loss.data.item())

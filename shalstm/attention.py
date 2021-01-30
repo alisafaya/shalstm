@@ -6,18 +6,22 @@ import torch.nn.functional as F
 
 
 class Overparam(nn.Module):
-    def __init__(self, hidden_size):
+    def __init__(self, hidden_size, device=torch.device("cpu")):
         super().__init__()
         self.linear = nn.Linear(hidden_size, 2 * hidden_size)
         self.hidden_size = hidden_size
 
+        self.device = device
+        self.to(device)
+
     def forward(self, x):
+        x = x.to(self.device)
         c, f = self.linear(x).split(self.hidden_size, dim=-1)
         return torch.sigmoid(f) * torch.tanh(c)
 
 
 class Attention(nn.Module):
-    def __init__(self, hidden_size):
+    def __init__(self, hidden_size, device=torch.device("cpu")):
         super().__init__()
         
         self.hidden_size = hidden_size
@@ -28,7 +32,7 @@ class Attention(nn.Module):
         self.value_gate = nn.Parameter(torch.zeros(size=(1, 1, hidden_size), dtype=torch.float))
 
         # over parameterized values gate
-        self.overparameterize = Overparam(hidden_size)
+        self.overparameterize = Overparam(hidden_size, device=device)
 
         # only applies to query
         self.affine_query = nn.Linear(hidden_size, hidden_size)
@@ -38,6 +42,9 @@ class Attention(nn.Module):
         self.gated_qs = None
         self.gated_ks = None
         self.gated_vs = None
+
+        self.device = device
+        self.to(device)
 
 
     def attention(self, query, key, value, attn_mask=None):
@@ -59,6 +66,8 @@ class Attention(nn.Module):
 
 
     def forward(self, query, key, value, attn_mask=None):
+
+        query, key, value, attn_mask = query.to(self.device), key.to(self.device), value.to(self.device), attn_mask.to(self.device)
         # (q, k, v)_seq_len, batch_size, hidden_size 
 
         if self.training or self.gated_qs is None:
