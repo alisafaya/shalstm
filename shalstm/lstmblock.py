@@ -4,33 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .attention import Attention
-
-class FForwardNetwork(nn.Module):
-    """Feed forward network or Boom layer as Smerity names it"""
-    def __init__(self, input_size, feedforward_size=None, dropout=0.1, activation=nn.GELU(), device=torch.device("cpu")):
-        super(FForwardNetwork, self).__init__()
-        
-        feedforward_size = input_size * 2 if feedforward_size is None else feedforward_size
-
-        self.linear1 = nn.Linear(input_size, feedforward_size)
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else False
-        self.linear2 = nn.Linear(feedforward_size, input_size)
-        self.activation = activation
-
-        self.device = device
-        self.to(device)
-
-    def forward(self, x):
-        x = x.to(self.device)
-        x = self.linear1(x)
-        x = self.activation(x)
-        
-        if self.dropout:
-            x = self.dropout(x)
-        
-        x = self.linear2(x)
-        return x
+from .attention import Attention, FForwardNetwork
 
 
 class LSTMBlock(nn.Module):
@@ -39,7 +13,7 @@ class LSTMBlock(nn.Module):
         super(LSTMBlock, self).__init__()
 
         self.lstm = nn.LSTM(input_size=input_size, hidden_size=input_size, batch_first=False)
-        self.attn = Attention(input_size, device=device) if use_attn else None
+        self.attn = Attention(input_size, dropout=dropout, device=device) if use_attn else None
         self.fforward = FForwardNetwork(input_size, fforward_size, dropout=dropout, device=device)
 
         self.ln_input = nn.LayerNorm(input_size, eps=1e-12)
@@ -108,5 +82,7 @@ class LSTMBlock(nn.Module):
 
         h = self.ln_output(h)
         h = x + h
+
+        # assert not h.isnan().any()
 
         return h, new_memory, new_hidden

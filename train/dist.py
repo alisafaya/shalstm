@@ -6,6 +6,7 @@ import argparse
 import datetime
 import time
 import math
+import random
 
 import torch
 import torch.distributed as dist
@@ -24,27 +25,38 @@ from glob import glob
 from tqdm import trange
 import numpy as np
 
-def run_proc(local_world_size, local_rank, args):
+def run_proc(local_rank, args):
 
     device_ids = list(range(local_rank, local_rank + 1))
     device = torch.device(device_ids[0])
-    rank = int(os.environ["RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
     
     print(f"Initialized process {local_rank}, with devices {device_ids}, global rank {rank}\n")
 
     no_batches = len(glob(args.train_dir + "*.pt"))
     # no_batches = 200
     args.evaluate_each = min(args.evaluate_each, no_batches // world_size)
+    start = 0
 
-    local_batches = [ f"{args.train_dir}batch_{((rank + i) % no_batches ) + 1:0>5}.pt" for i in range(0, args.epochs * world_size * math.ceil(no_batches / world_size), world_size) ]
+    local_batches = [ f"{args.train_dir}batch_{((rank + i) % no_batches ) + 1:0>5}.pt" for i in range(start, args.epochs * world_size * math.ceil(no_batches / world_size), world_size) ]
 
+    random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
 
     model = SHALSTM(args.model_config, device=device)
+    global_step = 0
+
+    # start from checkpoint
+    if args.load_checkpoint and rank == 0:
+        model.load(args.load_checkpoint)
+        print(f"[{os.getpid()}] Loaded checkpoint model", args.load_checkpoint)
+        print(f"[{os.getpid()}] Starting with global step =", global_step)
+
     model = DDP(model, device_ids)
+    print(f"[{os.getpid()}] initialized ddp model.")
 
     CHECKPOINT_PATH = args.checkpoint_path + ".init.pt"
     if rank == 0:
@@ -52,7 +64,7 @@ def run_proc(local_world_size, local_rank, args):
         # random parameters and gradients are synchronized in backward passes.
         # Therefore, saving it in one process is sufficient.
         torch.save(model.state_dict(), CHECKPOINT_PATH)
-        print("Saved initialized model.")
+        print(f"[{os.getpid()}] Saved initialized model.")
 
     # Use a barrier() to make sure that process 1 loads the model after process
     # 0 saves it.
@@ -72,9 +84,9 @@ def run_proc(local_world_size, local_rank, args):
 
     print(f"rank = {rank}, no batches = {no_batches}")
 
-    global_step = 0
     epoch = 1
-    for i, batch_path in enumerate(local_batches):
+    for i, batch_path in enumerate(local_batches, start=start // world_size):
+        print(f"Loading {batch_path}")
 
         # global step is just a counter of batches
         global_step = train(
@@ -84,6 +96,7 @@ def run_proc(local_world_size, local_rank, args):
             optimizer,
             scaler,
             args.base_lr,
+            world_size=world_size,
             rank=rank,
             global_step=global_step,
             log_interval=args.log_interval,
@@ -120,21 +133,22 @@ def run_proc(local_world_size, local_rank, args):
             args.base_lr /= 2
 
 
-def spmd_main(env_dict, local_world_size, local_rank, args):
+def spmd_main(local_rank, args):
 
     try:
+        process_rank = local_rank + args.rank
         dist.init_process_group(backend="nccl",
-                                init_method="file:///kuacc/users/asafaya19/shalstm/dist_shared", 
-                                rank=int(env_dict["RANK"]), 
-                                world_size=int(env_dict["WORLD_SIZE"]),
+                                init_method="file://" + args.dist_file, 
+                                rank=process_rank, 
+                                world_size=args.world_size,
                                 timeout=datetime.timedelta(0, 60 * 60 *2))
-        
+
         print(
             f"[{os.getpid()}] world_size = {dist.get_world_size()}, "
             + f"rank = {dist.get_rank()}, backend={dist.get_backend()}"
         )
 
-        run_proc(local_world_size, local_rank, args)
+        run_proc(local_rank, args)
 
     except Exception:
         traceback.print_exc()
@@ -144,38 +158,42 @@ def spmd_main(env_dict, local_world_size, local_rank, args):
 
 if __name__ == "__main__":
     
-    env_dict = {
-        key: os.environ[key]
-        for key in ("MASTER_ADDR", "MASTER_PORT", "RANK", "WORLD_SIZE")
-    }
-
-    print(f"[{os.getpid()}] Initializing process group with: {env_dict}")
-    
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--local_rank", type=int, default=0)
     parser.add_argument("--local_world_size", type=int, default=1)
+    parser.add_argument("--world_size", type=int, default=1)
+    parser.add_argument("--rank", type=int, default=0)
+    parser.add_argument("--local_rank", type=int, default=0)
+    parser.add_argument("--dist_file", type=str, default="/kuacc/users/asafaya19/shalstm/dist_shared")
     parser.add_argument("--seed", type=int, default=123)
 
-    parser.add_argument("--base_lr", type=float, default=3e-3)
+    parser.add_argument("--base_lr", type=float, default=2e-3)
     parser.add_argument("--clip_value", type=float, default=0.25)
     parser.add_argument("--bptt", type=int, default=768)
     parser.add_argument("--warmup", type=int, default=1000)
     parser.add_argument("--batch_size", type=int, default=32)
 
-    parser.add_argument("--evaluate_each", type=int, default=4)
-    parser.add_argument("--log_interval", type=int, default=10)
-    parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--evaluate_each", type=int, default=8)
+    parser.add_argument("--log_interval", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=1)
 
     parser.add_argument("--train_dir", type=str, default="/userfiles/asafaya19/pile/train/")
     parser.add_argument("--val_dir", type=str, default="/userfiles/asafaya19/pile/val/")
     parser.add_argument("--test_dir", type=str, default="/userfiles/asafaya19/pile/test/")
     
     parser.add_argument("--checkpoint_path", type=str, default="bin/pile/small/small")
+    parser.add_argument("--load_checkpoint", type=str, default="")
     parser.add_argument("--model_config", type=str, default="config/small.json")
-    parser.add_argument("--writer_dir", type=str, default="runs/small-5")
+    parser.add_argument("--writer_dir", type=str, default="runs/small-4")
 
     args = parser.parse_args()
-    spmd_main(env_dict, args.local_world_size, args.local_rank, args)
+
+    spmd_main(args.local_rank, args)
+
+    # import torch.multiprocessing as mp
+    # mp.spawn(spmd_main,
+    #          args=(args,),
+    #          nprocs=args.local_world_size,
+    #          join=True)
 
 

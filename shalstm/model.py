@@ -51,7 +51,7 @@ class SHALSTM(nn.Module):
             self.dropouti = config.get("dropouti", 0.1)
             self.dropouto = config.get("dropouto", 0.1)
             self.dropouth = config.get("dropouth", 0.1)
-            self.vocab_size = config.get("vocab_size", 2**15)
+            self.vocab_size = config.get("vocab_size", 2**14)
         elif isinstance(config, str):
             config = json.loads(open(config).read())
             self.load_config(config)
@@ -80,7 +80,7 @@ class SHALSTM(nn.Module):
         total_norm = total_norm ** (1. / 2)
         return total_norm 
 
-    def _check_grads(self):
+    def _check_nan_grads(self):
         for p in self.parameters():
             if p.grad is not None:
                 if (p.grad.data != p.grad.data).any():
@@ -103,7 +103,7 @@ class SHALSTM(nn.Module):
         total_length = len(x) + (len(mems[0]) if mems else 0)
 
         # create attention mask
-        attn_mask = torch.full((len(x), len(x)), -float('Inf'), device=h.device, dtype=h.dtype)
+        attn_mask = torch.full((len(x), len(x)), -1e6, device=h.device, dtype=h.dtype) # instead of -Inf we use -0.000001
         attn_mask = torch.triu(attn_mask, diagonal=1)
         if mems is not None:
             max_mems = max(len(m) for m in mems)
@@ -116,6 +116,7 @@ class SHALSTM(nn.Module):
             mem = mems[idx] if mems is not None else None
             hid = hidden[idx] if hidden is not None else None
             h, new_mem, new_hid = block(h, attn_mask, self.memory_size, memory=mem, hidden=hid)
+            # assert not h.isnan().any(), f"LSTM Block output is nan on {idx}"
             new_hidden.append(new_hid)
             new_mems.append(new_mem)
         
@@ -125,6 +126,8 @@ class SHALSTM(nn.Module):
         if targets is not None:
             # calculate loss targets are provided
             loss = self.ate(h.view(-1, self.embed_size), targets.to(self.device).view(-1)).loss
+            # assert not loss.isnan().any() 
+            # assert not h.isnan().any()
             return loss, h, new_hidden, new_mems
         else:
             # calculate predictions
@@ -147,9 +150,6 @@ class SHALSTM(nn.Module):
 
     def load(self, path):
         state_dict = torch.load(path)
-        for key, value in state_dict.items():
-            state_dict[key] = value.to(self.device)
-
         self.load_state_dict(state_dict)
 
 

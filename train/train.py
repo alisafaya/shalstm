@@ -3,6 +3,7 @@ import time
 import math
 import random
 import numpy as np
+from torch import autograd
 from glob import glob
 
 def batchify(data, batch_size):
@@ -33,10 +34,14 @@ def warmup_lr(optimizer, lr, ratio):
 def evaluate_dir(model, batch_dir, batch_size, set="val", writer=None, global_step=0, seq_len=1024, device=torch.device("cuda")):
     
     print("Evaluating", batch_dir)
+    ###
+    shift = 0
+    ###
 
     loss, total_len = 0, 0
+    hidden, mems = None, None
     for batch in glob(batch_dir):
-        l, t = evaluate(model, batch, batch_size, seq_len=seq_len, device=device)
+        l, t, hidden, mems = evaluate(model, batch, batch_size, hidden=hidden, mems=mems, seq_len=seq_len, device=device)
         loss += l
         total_len += t
 
@@ -45,22 +50,20 @@ def evaluate_dir(model, batch_dir, batch_size, set="val", writer=None, global_st
     bpt = loss / math.log(2)
 
     if writer is not None:
-        writer.add_scalar(f'{set}/loss', loss, global_step)
-        writer.add_scalar(f'{set}/ppl', ppl, global_step)
-        writer.add_scalar(f'{set}/bpt', bpt, global_step)
+        writer.add_scalar(f'{set}/loss', loss, global_step + shift)
+        writer.add_scalar(f'{set}/ppl', ppl, global_step + shift)
+        writer.add_scalar(f'{set}/bpt', bpt, global_step + shift)
 
     print("Finished evaluation")
 
     return loss
 
-def evaluate(model, batch_path, batch_size, seq_len=1024, device=torch.device("cuda")):
+def evaluate(model, batch_path, batch_size, hidden=None, mems=None, seq_len=1024, device=torch.device("cuda")):
 
     data = torch.load(batch_path).long()
-    data = batchify(data, batch_size)#.to(device)
-    # data = batchify(data, batch_size)[:1024 * 32].to(device)
+    data = batchify(data, batch_size)
 
     total_loss, i = 0, 0
-    hidden, mems = None, None
     model.eval()
     with torch.no_grad():
         while i < data.size(0) - 2:
@@ -72,7 +75,7 @@ def evaluate(model, batch_path, batch_size, seq_len=1024, device=torch.device("c
             total_loss += loss.item() * len(data)
             i += seq_len
 
-    return total_loss, i
+    return total_loss, i, hidden, mems
 
 def train(
         model,
@@ -82,6 +85,7 @@ def train(
         scaler,
         base_lr,
         rank=0,
+        world_size=1,
         global_step=0,
         seq_len=1024,
         log_interval=100,
@@ -93,11 +97,13 @@ def train(
         use_amp=True,
         device=torch.device("cuda")
         ):
-    
-    train_data = torch.load(batch_path).long()
-    train_data = batchify(train_data, batch_size) #.to(device)
-    # train_data = batchify(train_data, batch_size)[:1024 * (32 + random.randint(1, 10))] #.to(device)
 
+    ###
+    shift = 0
+    ###
+
+    train_data = torch.load(batch_path).long()
+    train_data = batchify(train_data, batch_size)
     losses, grad_history = [], []
 
     total_loss, minibatch, i = 0, 0, 0
@@ -105,19 +111,27 @@ def train(
     model.train()
     
     with model.join():
-        while i < train_data.size(0) - 2:
+        while i < train_data.size(0) - (seq_len + 2):
 
             # warm up
             ratio = (1 + min(global_step, warmup)) / warmup
             if ratio <= 1:
                 warmup_lr(optimizer, base_lr, ratio)
-            
+
+            # randomly cut out memory %5 of the iterations
+            if random.randint(0, max(world_size, 20)) == rank:
+                hidden = None
+                mems = None
+
             # get minibatch
-            data, targets = get_batch(train_data, i, seq_len=seq_len)
+            if random.randint(0, max(world_size, 20)) == rank:
+                data, targets = get_batch(train_data, i, seq_len=seq_len)
+            else:
+                data, targets = get_batch(train_data, i, seq_len=seq_len // 2)
             
             # zero out gradients
-            optimizer.zero_grad()
-
+            model.zero_grad()
+            
             # calculate loss
             with torch.cuda.amp.autocast(enabled=use_amp):
                 loss, output, hidden, mems = model(data, hidden=hidden, mems=mems, targets=targets)
@@ -126,32 +140,13 @@ def train(
             scaler.scale(loss).backward()
             
             # debug step
-            if model.module._check_grads():
+            if model.module._check_nan_grads():
 
                 print("NaN gradients detected, logging...")
                 print(f"i={i}, minibatch={minibatch}, batch_path={batch_path}, global_step={global_step}")
-                
-                if rank == 0:
-                    grad_dict = {k:v.grad for k, v in zip(model.module.state_dict(), model.module.parameters())}
-                    for k in grad_dict:
-                        if (grad_dict[k].data != grad_dict[k].data).any():
-                            print("NaN grad at", k)
-                        else:
-                            print("No NaN grad at", k)
 
-                    batch_id = batch_path.split("/")[-1]
-                    torch.save(model.state_dict(), f"error_log/param_{global_step}_{batch_id}")
-                    torch.save(grad_dict, f"error_log/grad_{global_step}_{batch_id}")
-                    torch.save(optimizer.state_dict(), f"error_log/optim_{global_step}_{batch_id}")
-
-                # minibatch += 1
-                # i += seq_len
-                # global_step += 1
-
-                import sys; sys.exit("NaN gradients detected, terminating..")
-            
             scaler.unscale_(optimizer)
-            
+
             # calculate dynamic gradient clip threshold
             if not static_clip:
                 obs_grad_norm = model.module._get_grad_norm()
@@ -163,27 +158,34 @@ def train(
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
 
             # update weights
-            scaler.step(optimizer)
+            if not model.module._check_nan_grads():
+                scaler.step(optimizer)
+            
+            # # update scaler's scale value
+            # if scaler.get_scale() < 2**10:
+            #     scaler.update(float(2**10))
+            # else:
             scaler.update()
 
             total_loss += loss.item()
             if minibatch % log_interval == 0 and minibatch > 0:
 
-                cur_loss = min(total_loss / log_interval, 2e1)
+                cur_loss = min(total_loss / log_interval, 1e1)
                 lr = optimizer.param_groups[0]['lr']
                 ppl = math.exp(cur_loss)
                 bpt = cur_loss / math.log(2)
 
                 if writer is not None:
-                    writer.add_scalar('training/loss', cur_loss, global_step)
-                    writer.add_scalar('training/ppl', ppl, global_step)
-                    writer.add_scalar('training/bpt', bpt, global_step)
-                    writer.add_scalar('training/lr', lr, global_step)
+                    writer.add_scalar('training/loss', cur_loss, global_step + shift)
+                    writer.add_scalar('training/scale', scaler.get_scale(), global_step + shift)
+                    writer.add_scalar('training/ppl', ppl, global_step + shift)
+                    writer.add_scalar('training/bpt', bpt, global_step + shift)
+                    writer.add_scalar('training/lr', lr, global_step + shift)
 
                 total_loss = 0
 
             minibatch += 1
-            i += seq_len
+            i += len(data)
             global_step += 1
     
     return global_step
