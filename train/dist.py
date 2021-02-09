@@ -35,7 +35,6 @@ def run_proc(local_rank, args):
     print(f"Initialized process {local_rank}, with devices {device_ids}, global rank {rank}\n")
 
     no_batches = len(glob(args.train_dir + "*.pt"))
-    # no_batches = 200
     args.evaluate_each = min(args.evaluate_each, no_batches // world_size)
     start = 0
 
@@ -85,7 +84,7 @@ def run_proc(local_rank, args):
     print(f"rank = {rank}, no batches = {no_batches}")
 
     epoch = 1
-    for i, batch_path in enumerate(local_batches, start=start // world_size):
+    for i, batch_path in enumerate(local_batches):
         print(f"Loading {batch_path}")
 
         # global step is just a counter of batches
@@ -110,7 +109,7 @@ def run_proc(local_rank, args):
         if i % args.evaluate_each == 0 and i > 0:
 
             if rank == 0:
-                evaluate_dir(model.module, args.val_dir + "*.pt", args.batch_size, set="val", writer=writer, global_step=global_step, seq_len=args.bptt, device=device)
+                # evaluate_dir(model.module, args.val_dir + "*.pt", args.batch_size, set="val", writer=writer, global_step=global_step, seq_len=args.bptt, device=device)
                 model.module.save(args.checkpoint_path + f"_{global_step}")
                 torch.save(model.state_dict(), CHECKPOINT_PATH)
 
@@ -164,7 +163,7 @@ if __name__ == "__main__":
     parser.add_argument("--world_size", type=int, default=1)
     parser.add_argument("--rank", type=int, default=0)
     parser.add_argument("--local_rank", type=int, default=0)
-    parser.add_argument("--dist_file", type=str, default="/kuacc/users/asafaya19/shalstm/dist_shared")
+    parser.add_argument("--dist_file", type=str, default="dist_shared")
     parser.add_argument("--seed", type=int, default=123)
 
     parser.add_argument("--base_lr", type=float, default=2e-3)
@@ -173,8 +172,8 @@ if __name__ == "__main__":
     parser.add_argument("--warmup", type=int, default=1000)
     parser.add_argument("--batch_size", type=int, default=32)
 
-    parser.add_argument("--evaluate_each", type=int, default=8)
-    parser.add_argument("--log_interval", type=int, default=100)
+    parser.add_argument("--evaluate_each", type=int, default=5)
+    parser.add_argument("--log_interval", type=int, default=50)
     parser.add_argument("--epochs", type=int, default=1)
 
     parser.add_argument("--train_dir", type=str, default="/userfiles/asafaya19/pile/train/")
@@ -184,16 +183,8 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_path", type=str, default="bin/pile/small/small")
     parser.add_argument("--load_checkpoint", type=str, default="")
     parser.add_argument("--model_config", type=str, default="config/small.json")
-    parser.add_argument("--writer_dir", type=str, default="runs/small-4")
+    parser.add_argument("--writer_dir", type=str, default="runs/small")
 
     args = parser.parse_args()
 
     spmd_main(args.local_rank, args)
-
-    # import torch.multiprocessing as mp
-    # mp.spawn(spmd_main,
-    #          args=(args,),
-    #          nprocs=args.local_world_size,
-    #          join=True)
-
-

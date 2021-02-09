@@ -152,6 +152,15 @@ class SHALSTM(nn.Module):
         state_dict = torch.load(path)
         self.load_state_dict(state_dict)
 
+    @staticmethod
+    def from_pretrained(path, device=torch.device("cpu")):
+        config = json.loads(open(path + ".json").read())
+        model = SHALSTM(config, device=device)
+        model.load(path + ".pt")
+        model.to(device)
+
+        return model
+
 
 if __name__ == "__main__":
     device = torch.device("cuda:0")

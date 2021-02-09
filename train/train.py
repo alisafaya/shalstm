@@ -1,10 +1,19 @@
-import torch
 import time
 import math
 import random
-import numpy as np
-from torch import autograd
 from glob import glob
+from contextlib import contextmanager
+
+import numpy as np
+
+import torch
+import torch.nn as nn
+from torch import autograd
+
+from tensorboardX import SummaryWriter
+
+from shalstm.model import SHALSTM
+from shalstm.optim import MinTrustLamb
 
 def batchify(data, batch_size):
     # Work out how cleanly we can divide the dataset into batch_size parts.
@@ -15,23 +24,18 @@ def batchify(data, batch_size):
     data = data.view(batch_size, -1).t().contiguous()
     return data
 
+
 def get_batch(source, step, seq_len):
     
     if len(source) < ( 1 + step + seq_len ):
-        data = source[-(seq_len+1): -1]
-        target = source[-seq_len:]
-    else:
-        data = source[step:step+seq_len]
-        target = source[step + 1:step + 1 + seq_len]
-    
+        seq_len = len(source) - step - 1
+
+    data = source[step:step+seq_len]
+    target = source[step + 1:step + 1 + seq_len]
     return data, target
 
-def warmup_lr(optimizer, lr, ratio):
-    for param_group in optimizer.param_groups:        
-        param_group['lr'] = lr * ratio
 
-
-def evaluate_dir(model, batch_dir, batch_size, set="val", writer=None, global_step=0, seq_len=1024, device=torch.device("cuda")):
+def evaluate_dir(model, batch_dir, batch_size, set="val", writer=None, ignore_first_batch=False, global_step=0, seq_len=1024, use_amp=True, return_len=False, device=torch.device("cuda")):
     
     print("Evaluating", batch_dir)
     ###
@@ -41,9 +45,12 @@ def evaluate_dir(model, batch_dir, batch_size, set="val", writer=None, global_st
     loss, total_len = 0, 0
     hidden, mems = None, None
     for batch in glob(batch_dir):
-        l, t, hidden, mems = evaluate(model, batch, batch_size, hidden=hidden, mems=mems, seq_len=seq_len, device=device)
+        l, t, hidden, mems = evaluate(model, batch, batch_size, ignore_first_batch=ignore_first_batch, use_amp=use_amp, hidden=hidden, mems=mems, seq_len=seq_len, device=device)
         loss += l
         total_len += t
+
+    if ignore_first_batch:
+        total_len -= seq_len
 
     loss = loss / total_len
     ppl = math.exp(loss)
@@ -56,26 +63,41 @@ def evaluate_dir(model, batch_dir, batch_size, set="val", writer=None, global_st
 
     print("Finished evaluation")
 
+    if return_len:
+        return loss, total_len
+
     return loss
 
-def evaluate(model, batch_path, batch_size, hidden=None, mems=None, seq_len=1024, device=torch.device("cuda")):
 
-    data = torch.load(batch_path).long()
-    data = batchify(data, batch_size)
+def evaluate(model, batch_path, batch_size, ignore_first_batch=False, hidden=None, mems=None, use_amp=False, seq_len=1024, device=torch.device("cuda")):
+
+    eval_data = torch.load(batch_path).long()
+    eval_data = batchify(eval_data, batch_size)
 
     total_loss, i = 0, 0
     model.eval()
     with torch.no_grad():
-        while i < data.size(0) - 2:
+        while i < eval_data.size(0) - 2:
             # get minibatch
-            data, targets = get_batch(data, i, seq_len=seq_len)
+            data, targets = get_batch(eval_data, i, seq_len=seq_len)
             
             # calculate loss
-            loss, output, hidden, mems = model(data, hidden=hidden, mems=mems, targets=targets)
-            total_loss += loss.item() * len(data)
-            i += seq_len
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                loss, output, h, m = model(data, hidden=hidden, mems=mems, targets=targets)
+            
+            if hidden is not None or not ignore_first_batch:
+                total_loss += loss.item() * len(data)
+
+            i += len(data)
+            hidden, mems = h, m
 
     return total_loss, i, hidden, mems
+
+
+def warmup_lr(optimizer, lr, ratio):
+    for param_group in optimizer.param_groups:        
+        param_group['lr'] = lr * ratio
+
 
 def train(
         model,
@@ -106,6 +128,9 @@ def train(
     train_data = batchify(train_data, batch_size)
     losses, grad_history = [], []
 
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = base_lr
+
     total_loss, minibatch, i = 0, 0, 0
     hidden, mems = None, None
     model.train()
@@ -115,8 +140,7 @@ def train(
 
             # warm up
             ratio = (1 + min(global_step, warmup)) / warmup
-            if ratio <= 1:
-                warmup_lr(optimizer, base_lr, ratio)
+            warmup_lr(optimizer, base_lr, min(1.0, ratio))
 
             # randomly cut out memory %5 of the iterations
             if random.randint(0, max(world_size, 20)) == rank:
@@ -141,7 +165,6 @@ def train(
             
             # debug step
             if model.module._check_nan_grads():
-
                 print("NaN gradients detected, logging...")
                 print(f"i={i}, minibatch={minibatch}, batch_path={batch_path}, global_step={global_step}")
 
@@ -161,10 +184,7 @@ def train(
             if not model.module._check_nan_grads():
                 scaler.step(optimizer)
             
-            # # update scaler's scale value
-            # if scaler.get_scale() < 2**10:
-            #     scaler.update(float(2**10))
-            # else:
+            # update scaler's scale value and other parameters
             scaler.update()
 
             total_loss += loss.item()
@@ -189,3 +209,116 @@ def train(
             global_step += 1
     
     return global_step
+
+
+class DummyDDPWrapper(nn.Module):
+    def __init__(self, module):
+        super(DummyDDPWrapper, self).__init__()
+        self.module = module
+
+    def forward(self, *args, **kwargs):
+        return self.module(*args, **kwargs)
+
+    @contextmanager
+    def join(self):
+        yield
+
+
+def main(args):
+
+    device = torch.device(args.device)
+    use_amp = args.no_amp
+    batches = glob(args.train_dir)
+
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    if args.device == "cuda":
+        torch.cuda.manual_seed(args.seed)
+
+    model = SHALSTM(args.model_config, device=device)
+
+    # start from checkpoint
+    if args.load_checkpoint and rank == 0:
+        model.load(args.load_checkpoint)
+        print(f"Loaded checkpoint model", args.load_checkpoint)
+
+    model = DummyDDPWrapper(model)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    optimizer = MinTrustLamb(model.parameters(), lr=args.base_lr)
+
+    writer = SummaryWriter(args.writer_dir)
+
+    best_loss, global_step = 1e3, 0
+    for epoch in range(args.epochs):
+        for batch_path in batches:
+
+            # global step is just a counter of batches
+            global_step = train(
+                model,
+                batch_path,
+                args.batch_size,
+                optimizer,
+                scaler,
+                args.base_lr,
+                global_step=global_step,
+                log_interval=args.log_interval,
+                clip_value=args.clip_value,
+                seq_len=args.bptt,
+                warmup=args.warmup,
+                writer=writer,
+                use_amp=use_amp,
+                device=device
+            )
+
+        loss = evaluate_dir(model.module, args.val_dir, args.batch_size, set="val", writer=writer, global_step=global_step, seq_len=args.bptt, device=device)
+
+        if best_loss > loss:
+            model.module.save(args.checkpoint_path)
+        else:
+            args.base_lr /= 2
+
+        print(f"Finished epoch {epoch}")
+
+    print("Starting Final Evaluation")
+    model.module.load(args.checkpoint_path)
+    evaluate_dir(model.module, args.val_dir, args.batch_size, set="val", writer=writer, global_step=global_step, seq_len=args.bptt, return_len=True, device=device)
+    evaluate_dir(model.module, args.test_dir, args.batch_size, set="test", writer=writer, global_step=global_step, seq_len=args.bptt, return_len=True, device=device)
+
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--base_lr", type=float, default=2e-3)
+    parser.add_argument("--clip_value", type=float, default=0.25)
+    parser.add_argument("--bptt", type=int, default=1024)
+    parser.add_argument("--warmup", type=int, default=1000)
+    parser.add_argument("--batch_size", type=int, default=32)
+
+    parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--no_amp", action="store_false")
+
+    parser.add_argument("--log_interval", type=int, default=50)
+    parser.add_argument("--epochs", type=int, default=25)
+
+    parser.add_argument("--train_dir", type=str, required=True)
+    parser.add_argument("--val_dir", type=str, required=True)
+    parser.add_argument("--test_dir", type=str, required=True)
+
+    parser.add_argument("--checkpoint_path", type=str, default="bin/enwik8/base/base")
+    parser.add_argument("--load_checkpoint", type=str, default="")
+
+    parser.add_argument("--model_config", type=str, default="config/base.json")
+    parser.add_argument("--writer_dir", type=str, default="runs/enwik8-base")
+
+    args = parser.parse_args()
+
+    print()
+    print(args)
+    print()
+
+    main(args)
