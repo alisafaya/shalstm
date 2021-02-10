@@ -1,6 +1,6 @@
 {
     "embed_size": 1536,
-    "memory_size": 4096,
+    "memory_size": 6144,
     "hidden_size": 3072,
     "no_layers": 4,
     "dropouti": 0.1,

@@ -7,8 +7,8 @@ nvidia-smi | grep 'python' | awk '{ print $5 }' | xargs -n1 kill -9
 [ -e $DIST_FILE ] && rm $DIST_FILE
 
 ## settings
-WORLD_SIZE=8
-NNODES=2
+WORLD_SIZE=12
+NNODES=3
 MASTER_ADDR='172.20.242.221'
 MASTER_PORT=22222
 NGPU_PER_NODE=$2

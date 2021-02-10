@@ -35,6 +35,15 @@ def get_batch(source, step, seq_len):
     return data, target
 
 
+def load_states_from_checkpoint(checkpoint, model=None, optimizer=None, scaler=None):
+    if model is not None and "model" in checkpoint:
+        model.load_state_dict(checkpoint["model"])
+    if optimizer is not None and "optimizer" in checkpoint:
+        optimizer.load_state_dict(checkpoint["optimizer"])
+    if scaler is not None and "scaler" in checkpoint:
+        scaler.load_state_dict(checkpoint["scaler"])
+
+
 def evaluate_dir(model, batch_dir, batch_size, set="val", writer=None, ignore_first_batch=False, global_step=0, seq_len=1024, use_amp=True, return_len=False, device=torch.device("cuda")):
     
     print("Evaluating", batch_dir)
@@ -113,7 +122,7 @@ def train(
         log_interval=100,
         warmup=False,
         writer=None,
-        clip_value=0.25,
+        clip_value=-1,
         static_clip=True,
         history_size=100, # this is used only if static_clip is False 
         use_amp=True,
@@ -178,7 +187,8 @@ def train(
                 clip_value = np.mean(grad_history)  
 
             # clip gradients
-            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
+            if clip_value != -1:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
 
             # update weights
             if not model.module._check_nan_grads():
@@ -246,7 +256,11 @@ def main(args):
 
     model = DummyDDPWrapper(model)
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
-    optimizer = MinTrustLamb(model.parameters(), lr=args.base_lr)
+    
+    from apex.optimizers import FusedLAMB
+    
+    optimizer = FusedLAMB(model.parameters(), lr=args.base_lr,
+                 max_grad_norm=args.clip_value, use_nvlamb=True)
 
     writer = SummaryWriter(args.writer_dir)
 
@@ -264,7 +278,6 @@ def main(args):
                 args.base_lr,
                 global_step=global_step,
                 log_interval=args.log_interval,
-                clip_value=args.clip_value,
                 seq_len=args.bptt,
                 warmup=args.warmup,
                 writer=writer,
@@ -282,7 +295,7 @@ def main(args):
         print(f"Finished epoch {epoch}")
 
     print("Starting Final Evaluation")
-    model.module.load(args.checkpoint_path)
+    model.module.load(args.checkpoint_path + ".pt")
     evaluate_dir(model.module, args.val_dir, args.batch_size, set="val", writer=writer, global_step=global_step, seq_len=args.bptt, return_len=True, device=device)
     evaluate_dir(model.module, args.test_dir, args.batch_size, set="test", writer=writer, global_step=global_step, seq_len=args.bptt, return_len=True, device=device)
 
@@ -293,7 +306,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--base_lr", type=float, default=2e-3)
-    parser.add_argument("--clip_value", type=float, default=0.25)
+    parser.add_argument("--clip_value", type=float, default=0.1)
     parser.add_argument("--bptt", type=int, default=1024)
     parser.add_argument("--warmup", type=int, default=1000)
     parser.add_argument("--batch_size", type=int, default=32)
