@@ -103,7 +103,7 @@ class SHALSTM(nn.Module):
         total_length = len(x) + (len(mems[0]) if mems else 0)
 
         # create attention mask
-        attn_mask = torch.full((len(x), len(x)), -1e6, device=h.device, dtype=h.dtype) # instead of -Inf we use -0.000001
+        attn_mask = torch.full((len(x), len(x)), -1e6, device=h.device, dtype=h.dtype) # instead of -Inf we use -1,000,000
         attn_mask = torch.triu(attn_mask, diagonal=1)
         if mems is not None:
             max_mems = max(len(m) for m in mems)
