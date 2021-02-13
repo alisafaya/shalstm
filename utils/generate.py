@@ -1,37 +1,12 @@
 # coding: utf-8
 
 import argparse
-import functools
-import time
-import math
-import numpy as np
+
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.checkpoint as checkpoint
-import os
-import hashlib
 
-import data
 from shalstm.model import SHALSTM
-from shalstm.optim import MinTrustLamb
-
-def model_save(fn):
-    with open(fn, 'wb') as f:
-        torch.save(model, f)
-
-def model_load(fn):
-    global model, optimizer
-    with open(fn, 'rb') as f:
-        m = torch.load(f)
-        d = m.state_dict()
-        model.load_state_dict(d, strict=False)
-
-def batchify(data, bsz, args):
-    nbatch = data.size(0) // bsz
-    data = data.narrow(0, 0, nbatch * bsz)
-    data = data.view(bsz, -1).t().contiguous()
-    return data
+from tokenizers import Tokenizer
 
 def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, filter_value=-float('Inf')):
     """ Filter a distribution of logits using top-k and/or nucleus (top-p) filtering
@@ -61,44 +36,62 @@ def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, filter_value=-float('Inf')
 
         indices_to_remove = sorted_indices[sorted_indices_to_remove]
         logits[indices_to_remove] = filter_value
+    
     return logits
 
-fn = 'corpus.{}.data'.format(hashlib.md5("data/enwik8/".encode()).hexdigest())
-if os.path.exists(fn):
-    print('Loading cached dataset...')
-    corpus = torch.load(fn)
-else:
-    print('Producing dataset...')
-    corpus = data.Corpus(args.data)
-    torch.save(corpus, fn)
 
-batch_size = 1
-eval_batch_size = 1
-val_data = batchify(corpus.valid, eval_batch_size, 232)
-ntokens = len(corpus.dictionary)
-inpt = val_data[:4096, :].cuda()
+def main(args):
 
-model = SHALSTM(ntokens, 1024, 2048)
-model_load("bin/small_model.pt")
-model = model.cuda()
-model.eval()
+    tokenizer = Tokenizer.from_file(args.tokenizer)
+    
+    device = torch.device(args.device)
 
-hidden = None
-mems = None
-output, h,  hidden, mems = model(inpt[:-1], hidden=hidden, mems=mems)
-inp = inpt[-1:, :]
+    model = SHALSTM.from_pretrained(args.model, device=device)
+    model.eval()
 
-sequence = "".join(list(map(lambda x: chr(int(corpus.dictionary.idx2word[x])) if x != 20 else "\n", inpt.flatten().cpu() )))
-sequence += "|-start-of-generated-text-|"
+    prompt = [args.eos_id,]
+    if args.prompt:
+        prompt += tokenizer.encode(args.prompt).ids
 
-with torch.no_grad():
-    for i in range(4096):
-        output, h, hidden, mems = model(inp, hidden=hidden, mems=mems)
-        output = top_k_top_p_filtering(output.view(-1), top_p=0.98).view(*output.shape)
-        token_weights = F.softmax(output, dim=-1).squeeze()
-        output_idx = torch.multinomial(token_weights, num_samples=1)[0]
-        inp.data.fill_(output_idx)
-        token = chr(int(corpus.dictionary.idx2word[output_idx])) if output_idx != 20 else "\n"
-        sequence += token
+    sequence = prompt
+    prompt = torch.tensor(prompt, dtype=torch.long).view(-1, 1)
 
-print(sequence)
+    hidden, mems = None, None
+    
+    if args.prompt:
+        output, h,  hidden, mems = model(prompt[:-1], hidden=hidden, mems=mems)
+        prompt = prompt[-1:]
+
+    with torch.no_grad():
+        for i in range(args.max_length):
+            output, h, hidden, mems = model(prompt, hidden=hidden, mems=mems)
+
+            if args.use_sampling:
+                output = top_k_top_p_filtering(output.view(-1) / args.temperature, top_p=args.top_p).view(*output.shape)
+                token_weights = F.softmax(output, dim=-1).squeeze()
+                output_idx = torch.multinomial(token_weights, num_samples=1)[0]
+            else:
+                output_idx = torch.argmax(output.view(-1))
+
+            prompt.fill_(output_idx)
+            sequence.append(output_idx.item())
+            if output_idx == args.eos_id:
+                break
+
+    print(tokenizer.decode(sequence))
+
+if __name__ == "__main__":
+    
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--model", type=str, required=True)
+    parser.add_argument("--tokenizer", type=str, required=True)
+    parser.add_argument("--eos_id", type=int, default=2)
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--max_length", type=int, default=1024)
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--top_p", type=float, default=0.98)
+    parser.add_argument("--use_sampling", action="store_true")
+    parser.add_argument("--prompt", type=str, default="")
+    args = parser.parse_args()
+    main(args)

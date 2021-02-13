@@ -4,8 +4,6 @@ import argparse
 from glob import glob
 
 import torch
-import torch.distributed as dist
-import torch.nn as nn
 
 from shalstm.model import SHALSTM
 from .train import evaluate_dir

@@ -132,6 +132,7 @@ class SHALSTM(nn.Module):
         else:
             # calculate predictions
             output = self.ate.log_prob(h.view(-1, self.embed_size))
+            output = output.view(x.size(0), -1)
             return output, h, new_hidden, new_mems
 
     def generate(self, initial=None):
