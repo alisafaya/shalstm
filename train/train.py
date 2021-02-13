@@ -15,6 +15,9 @@ from tensorboardX import SummaryWriter
 from shalstm.model import SHALSTM
 from shalstm.optim import MinTrustLamb
 
+import torch_xla
+import torch_xla.core.xla_model as xm
+
 def batchify(data, batch_size):
     # Work out how cleanly we can divide the dataset into batch_size parts.
     nbatch = data.size(0) // batch_size
@@ -81,7 +84,7 @@ def evaluate_dir(model, batch_dir, batch_size, set="val", writer=None, ignore_fi
 def evaluate(model, batch_path, batch_size, ignore_first_batch=False, hidden=None, mems=None, use_amp=False, seq_len=1024, device=torch.device("cuda")):
 
     eval_data = torch.load(batch_path).long()
-    eval_data = batchify(eval_data, batch_size)
+    eval_data = batchify(eval_data, batch_size).to(device)
 
     total_loss, i = 0, 0
     model.eval()
@@ -91,8 +94,7 @@ def evaluate(model, batch_path, batch_size, ignore_first_batch=False, hidden=Non
             data, targets = get_batch(eval_data, i, seq_len=seq_len)
             
             # calculate loss
-            with torch.cuda.amp.autocast(enabled=use_amp):
-                loss, output, h, m = model(data, hidden=hidden, mems=mems, targets=targets)
+            loss, output, h, m = model(data, hidden=hidden, mems=mems, targets=targets)
             
             if hidden is not None or not ignore_first_batch:
                 total_loss += loss.item() * len(data)
@@ -113,7 +115,6 @@ def train(
         batch_path,
         batch_size,
         optimizer,
-        scaler,
         base_lr,
         rank=0,
         world_size=1,
@@ -134,7 +135,7 @@ def train(
     ###
 
     train_data = torch.load(batch_path).long()
-    train_data = batchify(train_data, batch_size)
+    train_data = batchify(train_data, batch_size).to(device)
     losses, grad_history = [], []
 
     for param_group in optimizer.param_groups:
@@ -166,25 +167,15 @@ def train(
             model.zero_grad()
             
             # calculate loss
-            with torch.cuda.amp.autocast(enabled=use_amp):
-                loss, output, hidden, mems = model(data, hidden=hidden, mems=mems, targets=targets)
+            loss, output, hidden, mems = model(data, hidden=hidden, mems=mems, targets=targets)
 
             # do backward pass
-            scaler.scale(loss).backward()
+            loss.backward()
             
             # debug step
             if model.module._check_nan_grads():
                 print("NaN gradients detected, logging...")
                 print(f"i={i}, minibatch={minibatch}, batch_path={batch_path}, global_step={global_step}")
-
-            scaler.unscale_(optimizer)
-
-            # calculate dynamic gradient clip threshold
-            if not static_clip:
-                obs_grad_norm = model.module._get_grad_norm()
-                grad_history.append(obs_grad_norm)
-                grad_history = grad_history[-history_size:]
-                clip_value = np.mean(grad_history)  
 
             # clip gradients
             if clip_value != -1:
@@ -192,11 +183,8 @@ def train(
 
             # update weights
             if not model.module._check_nan_grads():
-                scaler.step(optimizer)
+                xm.optimizer_step(optimizer)
             
-            # update scaler's scale value and other parameters
-            scaler.update()
-
             total_loss += loss.item()
             if minibatch % log_interval == 0 and minibatch > 0:
 
@@ -207,7 +195,6 @@ def train(
 
                 if writer is not None:
                     writer.add_scalar('training/loss', cur_loss, global_step + shift)
-                    writer.add_scalar('training/scale', scaler.get_scale(), global_step + shift)
                     writer.add_scalar('training/ppl', ppl, global_step + shift)
                     writer.add_scalar('training/bpt', bpt, global_step + shift)
                     writer.add_scalar('training/lr', lr, global_step + shift)
@@ -221,31 +208,17 @@ def train(
     return global_step
 
 
-class DummyDDPWrapper(nn.Module):
-    def __init__(self, module):
-        super(DummyDDPWrapper, self).__init__()
-        self.module = module
-
-    def forward(self, *args, **kwargs):
-        return self.module(*args, **kwargs)
-
-    @contextmanager
-    def join(self):
-        yield
-
-
 def main(args):
 
-    device = torch.device(args.device)
+    # device = torch.device(args.device)
+    device = xm.xla_device()
+
     use_amp = args.no_amp
     batches = glob(args.train_dir)
 
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-
-    if args.device == "cuda":
-        torch.cuda.manual_seed(args.seed)
 
     model = SHALSTM(args.model_config, device=device)
 
@@ -254,14 +227,7 @@ def main(args):
         model.load(args.load_checkpoint)
         print(f"Loaded checkpoint model", args.load_checkpoint)
 
-    model = DummyDDPWrapper(model)
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
-    
-    from apex.optimizers import FusedLAMB
-    
-    optimizer = FusedLAMB(model.parameters(), lr=args.base_lr,
-                 max_grad_norm=args.clip_value, use_nvlamb=True)
-
+    optimizer = MinTrustLamb(model.parameters(), lr=args.base_lr)
     writer = SummaryWriter(args.writer_dir)
 
     best_loss, global_step = 1e3, 0
@@ -274,11 +240,11 @@ def main(args):
                 batch_path,
                 args.batch_size,
                 optimizer,
-                scaler,
                 args.base_lr,
                 global_step=global_step,
                 log_interval=args.log_interval,
                 seq_len=args.bptt,
+                clip_value=args.clip_value,
                 warmup=args.warmup,
                 writer=writer,
                 use_amp=use_amp,
