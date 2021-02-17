@@ -58,7 +58,7 @@ def validate_loss(
 
 def validate_f1(tokenizer, model, val_data, use_amp=True):
     
-    val_data, val_gold = val
+    val_data, val_gold = val_data
     predictions = get_predictions(model, val_data, use_amp=use_amp)
 
     tokenizer.decode_batch(predictions)
