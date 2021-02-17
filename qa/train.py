@@ -7,13 +7,11 @@ import torch
 
 from tokenizer import SHALSTMTokenizer
 from .model import SHALSTMforQuestionAnswering 
+from .eval import chunks, load_dataset_with_ids, get_predictions
+
 from apex.optimizers import FusedLAMB
 from tensorboardX import SummaryWriter
-
-def chunks(lst, n):
-    """Yield successive n-sized chunks from lst."""
-    for i in range(0, len(lst), n):
-        yield lst[i:i + n]
+from datasets import load_metric
 
 
 def load_tsv_dataset(dir, tokenizer, batch_size=32):
@@ -36,20 +34,17 @@ def load_tsv_dataset(dir, tokenizer, batch_size=32):
     return batches
 
 
-def eval(
+def validate_loss(
         model,
         val_data,
-        global_step=0,
-        writer=None,
         use_amp=True
         ):
 
     total_loss, minibatch = 0, 0
-
     model.eval()
     with torch.no_grad():
         for input, attn_mask, type_ids, input_length in val_data:
-        # calculate loss
+            # calculate loss
             with torch.cuda.amp.autocast(enabled=use_amp):
                 loss, h, hidden, mems = model(input, attn_mask, type_ids, return_loss=True)
 
@@ -57,10 +52,27 @@ def eval(
             minibatch += 1
 
     total_loss /= minibatch
-    if writer is not None:
-        writer.add_scalar('validation/loss', min(total_loss, 1e1), global_step)
 
     return total_loss
+
+
+def validate_f1(tokenizer, model, val_data, use_amp=True):
+    
+    val_data, val_gold = val
+    predictions = get_predictions(model, val_data, use_amp=use_amp)
+
+    tokenizer.decode_batch(predictions)
+
+    decoded = tokenizer.decode_batch(predictions)
+    decoded = [ s.split("</s>")[0] for s in decoded ]
+
+    metric = load_metric("squad")
+
+    predictions = [{'prediction_text':x , "id": str(y) } for y, x in enumerate(decoded, start=1) ]
+    references = [{'answers': {'answer_start': [1]*len(x), 'text': x  }, 'id': str(y) } for y, x in enumerate(val_gold, start=1) ]
+    
+    result = metric.compute(predictions=predictions, references=references)
+    return result
 
 
 def train(
@@ -152,8 +164,8 @@ def main(args):
     model = SHALSTMforQuestionAnswering.from_pretrained(args.model, device=torch.device(args.device))
     tokenizer = SHALSTMTokenizer.from_file(args.tokenizer)
     
-    train_data = load_tsv_dataset(args.train_dir, tokenizer, batch_size=args.batch_size)
-    val_data = load_tsv_dataset(args.val_dir, tokenizer, batch_size=args.batch_size)
+    train_data, train_gold = load_dataset_with_ids(args.train_dir, args.train_ans, tokenizer, batch_size=args.batch_size)
+    val = load_dataset_with_ids(args.val_dir, args.val_ans, tokenizer, batch_size=args.batch_size)
 
     warmup = args.warmup * len(train_data)
     total_steps = args.epochs * len(train_data)
@@ -169,6 +181,7 @@ def main(args):
 
     global_step = 0
     best_loss = 1e3
+    best_f1 = 0
 
     for epoch in range(1, args.epochs+1):
 
@@ -188,18 +201,25 @@ def main(args):
             use_amp=use_amp
         )
 
-        val_loss = eval(
-            model,
-            val_data,
-            global_step=global_step,
-            writer=writer,
-            use_amp=True
-        )
+        # val_loss = validate_loss(model, val_data, use_amp=True)
+        # writer.add_scalar('validation/loss', val_loss, global_step)
 
-        if val_loss < best_loss and args.checkpoint_dir:
+        val_result = validate_f1(tokenizer, model, val, use_amp=use_amp)
+        
+        writer.add_scalar('validation/f1', val_result["f1"], global_step)
+        writer.add_scalar('validation/exact_match', val_result["exact_match"], global_step)
+
+        if valf1 > best_f1 and args.checkpoint_dir:
             print("saving checkpoint...")
             model.save(args.checkpoint_dir)
 
+    model.load(args.checkpoint_dir + ".pt")
+    model.to(device)
+
+    val_result = validate_f1(tokenizer, model, val, use_amp=use_amp)
+
+    writer.add_scalar('train/f1', val_result["f1"], global_step)
+    writer.add_scalar('train/exact_match', val_result["exact_match"], global_step)
 
 if __name__ == "__main__":
     
@@ -222,10 +242,12 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=5)
 
     parser.add_argument("--train_dir", type=str, required=True)
+    parser.add_argument("--train_ans", type=str, required=True)
     parser.add_argument("--val_dir", type=str, required=True)
+    parser.add_argument("--val_ans", type=str, required=True)
     # parser.add_argument("--test_dir", type=str, required=True)
 
-    parser.add_argument("--writer_dir", type=str, default="runs/base-qa")
+    parser.add_argument("--writer_dir", type=str, default="qa-runs/base-qa")
     parser.add_argument("--checkpoint_dir", type=str, default="")
     args = parser.parse_args()
 

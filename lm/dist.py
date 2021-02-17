@@ -100,7 +100,7 @@ def run_proc(local_rank, args):
             rank=rank,
             global_step=global_step,
             log_interval=args.log_interval,
-            clip_value=args.clip_value,
+            clip_value=args.clip_value if args.optimizer != "fused" else -1,
             seq_len=args.bptt,
             warmup=args.warmup,
             writer=writer,

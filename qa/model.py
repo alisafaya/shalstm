@@ -65,7 +65,7 @@ class SHALSTMforQuestionAnswering(SHALSTM):
 
         if return_loss:
             # calculate loss targets are provided
-            loss = -(self.ate(h.view(-1, self.embed_size), input[1:].to(self.device).view(-1)).output * loss_mask).view(*x.shape).mean(0).mean()
+            loss = -(self.ate(h.view(-1, self.embed_size), input[1:].to(self.device).view(-1)).output * loss_mask).mean() # .view(*x.shape).mean(0).mean()
             return loss, h, new_hidden, new_mems
         else:
             # calculate predictions
