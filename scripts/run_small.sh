@@ -19,4 +19,4 @@ export OMP_NUM_THREADS=4 # ngpus / nthreads
 export NCCL_BLOCKING_WAIT=1
 
 ## run
-python -m torch.distributed.launch --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT --nnodes=$NNODES --node_rank=$RANK --nproc_per_node=$NGPU_PER_NODE -m train.dist --rank $NODERANK --world_size $WORLD_SIZE --local_world_size $NGPU_PER_NODE --writer_dir runs/small --checkpoint_path bin/pile/small/small --bptt 1536 --dist_file $DIST_FILE --model_config config/small.json
+python -m torch.distributed.launch --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT --nnodes=$NNODES --node_rank=$RANK --nproc_per_node=$NGPU_PER_NODE -m lm.dist --rank $NODERANK --world_size $WORLD_SIZE --local_world_size $NGPU_PER_NODE --writer_dir runs/small --checkpoint_path bin/pile/small/small --bptt 1536 --dist_file $DIST_FILE --model_config config/small.json

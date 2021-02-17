@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 from .lstmblock import LSTMBlock
 from .adaptive import AdaptiveTiedEmbeddings
+from .utils import top_k_top_p_filtering
 
 class SHALSTM(nn.Module):
     def __init__(self, config, device=torch.device("cpu")):
@@ -116,7 +117,6 @@ class SHALSTM(nn.Module):
             mem = mems[idx] if mems is not None else None
             hid = hidden[idx] if hidden is not None else None
             h, new_mem, new_hid = block(h, attn_mask, self.memory_size, memory=mem, hidden=hid)
-            # assert not h.isnan().any(), f"LSTM Block output is nan on {idx}"
             new_hidden.append(new_hid)
             new_mems.append(new_mem)
         
@@ -126,8 +126,6 @@ class SHALSTM(nn.Module):
         if targets is not None:
             # calculate loss targets are provided
             loss = self.ate(h.view(-1, self.embed_size), targets.to(self.device).view(-1)).loss
-            # assert not loss.isnan().any() 
-            # assert not h.isnan().any()
             return loss, h, new_hidden, new_mems
         else:
             # calculate predictions
@@ -135,10 +133,38 @@ class SHALSTM(nn.Module):
             output = output.view(x.size(0), -1)
             return output, h, new_hidden, new_mems
 
-    def generate(self, initial=None):
-        """ initial sequence has shape [seq length, batch] """
+    def generate(self, eos_id=2, initial_prompt=None, max_length=1024, use_sampling=True, top_p=0.95, temperature=1.0):
+        """ initial_prompt sequence has shape [seq length] """
 
-        raise NotImplementedError
+        sequence = [] if initial_prompt is None else initial_prompt
+        if initial_prompt is not None:
+            prompt = [eos_id,] + initial_prompt
+        else:
+            prompt = [eos_id,]
+        prompt = torch.tensor(prompt, dtype=torch.long).view(-1, 1)
+
+        self.eval()
+        hidden, mems = None, None
+        with torch.no_grad():
+            if initial_prompt is not None:
+                output, h,  hidden, mems = self(prompt[:-1], hidden=hidden, mems=mems)
+                prompt = prompt[-1:]
+
+            for i in range(max_length):
+                
+                output, h, hidden, mems = self(prompt, hidden=hidden, mems=mems)
+                if use_sampling:
+                    token_weights = top_k_top_p_filtering(torch.exp(output.view(-1)) / temperature, top_p=top_p, filter_value=0.0)
+                    output_idx = torch.multinomial(token_weights, num_samples=1)[0]
+                else:
+                    output_idx = torch.argmax(output.view(-1))
+
+                prompt.fill_(output_idx)
+                sequence.append(output_idx.item())
+                if output_idx == eos_id:
+                    break
+
+        return sequence
 
     def save(self, path):
         state_dict = self.state_dict()
@@ -153,10 +179,10 @@ class SHALSTM(nn.Module):
         state_dict = torch.load(path)
         self.load_state_dict(state_dict)
 
-    @staticmethod
-    def from_pretrained(path, device=torch.device("cpu")):
+    @classmethod
+    def from_pretrained(cls, path, device=torch.device("cpu")):
         config = json.loads(open(path + ".json").read())
-        model = SHALSTM(config, device=device)
+        model = cls(config, device=device)
         model.load(path + ".pt")
         model.to(device)
 
@@ -165,7 +191,6 @@ class SHALSTM(nn.Module):
 
 if __name__ == "__main__":
     device = torch.device("cuda:0")
-
     use_amp = True
 
     model = SHALSTM("config/small.json", device=device)
@@ -199,7 +224,6 @@ if __name__ == "__main__":
 
     model.save("bin/sample/sample_model")
     
-    new_model = SHALSTM("bin/sample/sample_model.json", device="cuda:0")
-    new_model.load("bin/sample/sample_model.pt")
+    new_model = SHALSTM.from_pretrained("bin/sample/sample_model", device="cuda:0")
     loss, h, new_hidden, new_mems = new_model(inp[:-1, :], targets=inp[1:, :])
     print(loss.data.item())

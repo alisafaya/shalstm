@@ -91,7 +91,11 @@ class Attention(nn.Module):
         attention_scores = torch.matmul(query / math.sqrt(hidden_size), key.transpose(-1, -2).contiguous())
 
         if attn_mask is not None:
-            attn_mask = attn_mask.view(1, 1, *attn_mask.shape[-2:])
+            if attn_mask.dim() == 2:
+                attn_mask = attn_mask.view(1, 1, *attn_mask.shape[-2:])
+            else:
+                attn_mask = attn_mask.view(batch_size, 1, *attn_mask.shape[-2:])
+
             attention_scores = attention_scores + attn_mask
 
         attention_weights = F.softmax(attention_scores, dim=-1)
