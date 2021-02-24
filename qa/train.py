@@ -1,5 +1,6 @@
 import random
 import argparse
+from glob import glob
 
 import numpy as np
 import torch.nn as nn
@@ -13,17 +14,27 @@ from apex.optimizers import FusedLAMB
 from tensorboardX import SummaryWriter
 from datasets import load_metric
 
+def load_states_from_checkpoint(checkpoint, model=None, optimizer=None, scaler=None):
+    if model is not None and "model" in checkpoint:
+        model.load_state_dict(checkpoint["model"])
+    if optimizer is not None and "optimizer" in checkpoint:
+        optimizer.load_state_dict(checkpoint["optimizer"])
+    if scaler is not None and "scaler" in checkpoint:
+        scaler.load_state_dict(checkpoint["scaler"])
 
 def load_tsv_dataset(dir, tokenizer, batch_size=32):
 
-    with open(dir) as fi:
-        lines = fi.read().splitlines()
-        random.shuffle(lines)
-        questions, answers = tuple(np.array(x) for x in zip(*[ l.split("\t") for l in lines ]))
+    lines = []
+    for f in glob(dir):
+        with open(f) as fi:
+            lines += fi.read().splitlines()
 
+    random.shuffle(lines)
+
+    questions, answers = tuple(np.array(x) for x in zip(*[ l.split("\t") for l in lines ]))
     q_lens = np.array([ len(tokenizer.encode(x)) for x in questions ])
     indices = np.argsort(q_lens)
-    
+
     questions = list(chunks(list(questions[indices]), batch_size))
     answers = list(chunks(list(answers[indices]), batch_size))
 
@@ -56,25 +67,6 @@ def validate_loss(
     return total_loss
 
 
-def validate_f1(tokenizer, model, val_data, use_amp=True):
-    
-    val_data, val_gold = val_data
-    predictions = get_predictions(model, val_data, use_amp=use_amp)
-
-    tokenizer.decode_batch(predictions)
-
-    decoded = tokenizer.decode_batch(predictions)
-    decoded = [ s.split("</s>")[0] for s in decoded ]
-
-    metric = load_metric("squad")
-
-    predictions = [{'prediction_text':x , "id": str(y) } for y, x in enumerate(decoded, start=1) ]
-    references = [{'answers': {'answer_start': [1]*len(x), 'text': x  }, 'id': str(y) } for y, x in enumerate(val_gold, start=1) ]
-    
-    result = metric.compute(predictions=predictions, references=references)
-    return result
-
-
 def train(
         model,
         train_data,
@@ -83,12 +75,12 @@ def train(
         lr_scheduler,
         global_step=0,
         log_interval=100,
-        warmup=False,
         writer=None,
         clip_value=-1,
         static_clip=True,
         history_size=100, # this is used only if static_clip is False 
-        use_amp=True
+        use_amp=True,
+        use_lm_loss=False
         ):
 
     total_loss, minibatch = 0, 0
@@ -101,7 +93,7 @@ def train(
         
         # calculate loss
         with torch.cuda.amp.autocast(enabled=use_amp):
-            loss, h, hidden, mems = model(input, attn_mask, type_ids, return_loss=True)
+            loss, h, hidden, mems = model(input, attn_mask, type_ids, return_loss=True, lm_loss=use_lm_loss)
 
         # do backward pass
         scaler.scale(loss).backward()
@@ -163,10 +155,10 @@ def main(args):
 
     model = SHALSTMforQuestionAnswering.from_pretrained(args.model, device=torch.device(args.device))
     tokenizer = SHALSTMTokenizer.from_file(args.tokenizer)
-    
-    train_data, train_gold = load_dataset_with_ids(args.train_dir, args.train_ans, tokenizer, batch_size=args.batch_size)
-    val = load_dataset_with_ids(args.val_dir, args.val_ans, tokenizer, batch_size=args.batch_size)
 
+    train_data = load_tsv_dataset(args.train_dir, tokenizer, batch_size=args.batch_size)
+    val_data = load_tsv_dataset(args.val_dir, tokenizer, batch_size=args.batch_size)
+    
     warmup = args.warmup * len(train_data)
     total_steps = args.epochs * len(train_data)
 
@@ -175,13 +167,23 @@ def main(args):
     else:
         optimizer = MinTrustLamb(model.parameters(), lr=args.base_lr)
 
-    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=[lambda x: float(x / warmup) if x < warmup else float((total_steps - x) / total_steps)])
+    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=[lambda x: float(x / warmup) if x < warmup else float((total_steps - x) / total_steps)]) # warmup with linear decay
+
+    # lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=[lambda x: float(x / warmup) if x < warmup else float(1.)]) # warmup with linear decay # warmup with no decay
+
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
-    writer = SummaryWriter(args.writer_dir)
+    
+    if args.writer_dir:
+        writer = SummaryWriter(args.writer_dir)
+    else:
+        writer = None
 
     global_step = 0
     best_loss = 1e3
     best_f1 = 0
+
+    if args.load_checkpoint:
+        load_states_from_checkpoint(torch.load(args.load_checkpoint), model=model, optimizer=optimizer, scaler=scaler)
 
     for epoch in range(1, args.epochs+1):
 
@@ -195,31 +197,28 @@ def main(args):
             scaler,
             lr_scheduler,
             global_step=global_step,
-            log_interval=100,
-            warmup=False,
+            log_interval=args.log_interval,
             writer=writer,
-            use_amp=use_amp
+            use_amp=use_amp,
+            use_lm_loss=args.pretraining
         )
 
-        # val_loss = validate_loss(model, val_data, use_amp=True)
-        # writer.add_scalar('validation/loss', val_loss, global_step)
+        val_loss = validate_loss(model, val_data, use_amp=use_amp)
+        writer.add_scalar('validation/loss', val_loss, global_step)
 
-        val_result = validate_f1(tokenizer, model, val, use_amp=use_amp)
-        
-        writer.add_scalar('validation/f1', val_result["f1"], global_step)
-        writer.add_scalar('validation/exact_match', val_result["exact_match"], global_step)
-
-        if valf1 > best_f1 and args.checkpoint_dir:
+        if args.checkpoint_dir:
             print("saving checkpoint...")
-            model.save(args.checkpoint_dir)
+            model.save(args.checkpoint_dir + "_" + str(epoch))
 
-    model.load(args.checkpoint_dir + ".pt")
-    model.to(device)
+            checkpoint = {
+                'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'scaler': scaler.state_dict()
+            }
+#             torch.save(checkpoint, args.checkpoint_dir + "_" + str(epoch) + ".ckpt")
 
-    val_result = validate_f1(tokenizer, model, val, use_amp=use_amp)
+            best_loss = val_loss
 
-    writer.add_scalar('train/f1', val_result["f1"], global_step)
-    writer.add_scalar('train/exact_match', val_result["exact_match"], global_step)
 
 if __name__ == "__main__":
     
@@ -227,12 +226,12 @@ if __name__ == "__main__":
 
     parser.add_argument("--tokenizer", type=str, required=True)
     parser.add_argument("--model", type=str, required=True)
+    parser.add_argument("--pretraining", action="store_true")
 
-    parser.add_argument("--base_lr", type=float, default=1e-4)
+    parser.add_argument("--base_lr", type=float, default=1e-3)
     parser.add_argument("--clip_value", type=float, default=0.1)
-    # parser.add_argument("--bptt", type=int, default=1024)
     parser.add_argument("--warmup", type=int, default=1)
-    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--batch_size", type=int, default=32)
 
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--device", type=str, default="cuda")
@@ -242,12 +241,10 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=5)
 
     parser.add_argument("--train_dir", type=str, required=True)
-    parser.add_argument("--train_ans", type=str, required=True)
     parser.add_argument("--val_dir", type=str, required=True)
-    parser.add_argument("--val_ans", type=str, required=True)
-    # parser.add_argument("--test_dir", type=str, required=True)
 
-    parser.add_argument("--writer_dir", type=str, default="qa-runs/base-qa")
+    parser.add_argument("--writer_dir", type=str, default="")
+    parser.add_argument("--load_checkpoint", type=str, default="")
     parser.add_argument("--checkpoint_dir", type=str, default="")
     args = parser.parse_args()
 

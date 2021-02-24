@@ -148,7 +148,7 @@ def train(
         while i < train_data.size(0) - (seq_len + 2):
 
             # warm up
-            ratio = (1 + min(global_step, warmup)) / warmup
+            ratio = (1 + global_step) / warmup
             warmup_lr(optimizer, base_lr, min(1.0, ratio))
 
             # randomly cut out memory %5 of the iterations
@@ -158,9 +158,9 @@ def train(
 
             # get minibatch
             if random.randint(0, max(world_size, 20)) == rank:
-                data, targets = get_batch(train_data, i, seq_len=seq_len)
-            else:
                 data, targets = get_batch(train_data, i, seq_len=seq_len // 2)
+            else:
+                data, targets = get_batch(train_data, i, seq_len=seq_len)
             
             # zero out gradients
             model.zero_grad()
@@ -278,10 +278,12 @@ def main(args):
                 args.base_lr,
                 global_step=global_step,
                 log_interval=args.log_interval,
+                clip_value=args.clip_value,
                 seq_len=args.bptt,
                 warmup=args.warmup,
                 writer=writer,
                 use_amp=use_amp,
+                rank=-1,
                 device=device
             )
 
@@ -289,6 +291,7 @@ def main(args):
 
         if best_loss > loss:
             model.module.save(args.checkpoint_path)
+            best_loss = loss
         else:
             args.base_lr /= 2
 
@@ -309,7 +312,7 @@ if __name__ == "__main__":
     parser.add_argument("--clip_value", type=float, default=0.1)
     parser.add_argument("--bptt", type=int, default=1024)
     parser.add_argument("--warmup", type=int, default=1000)
-    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--batch_size", type=int, default=16)
 
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--device", type=str, default="cuda")

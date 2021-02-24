@@ -6,7 +6,7 @@ from shalstm.utils import top_k_top_p_filtering
 
 class SHALSTMforQuestionAnswering(SHALSTM):
 
-    def forward(self, input, attention_mask=None, type_ids=None, hidden=None, mems=None, return_loss=False): # TODO: check that it handles longer sequences.
+    def forward(self, input, attention_mask=None, type_ids=None, hidden=None, mems=None, return_loss=False, lm_loss=False):
         """
         all arguments have shape (seq length, batch)
         padding should be on left for input, on right for targets (as in seq2seq models)
@@ -64,8 +64,12 @@ class SHALSTMforQuestionAnswering(SHALSTM):
         h = self.odrop(h)
 
         if return_loss:
-            # calculate loss targets are provided
-            loss = -(self.ate(h.view(-1, self.embed_size), input[1:].to(self.device).view(-1)).output * loss_mask).mean() # .view(*x.shape).mean(0).mean()
+            if not lm_loss:
+                # calculate loss targets are provided
+                loss = -(self.ate(h.view(-1, self.embed_size), input[1:].to(self.device).view(-1)).output * loss_mask).mean() # .view(*x.shape).mean(0).mean()
+            else:
+                # calculate loss on all tokens
+                loss = self.ate(h.view(-1, self.embed_size), input[1:].to(self.device).view(-1)).loss
             return loss, h, new_hidden, new_mems
         else:
             # calculate predictions
@@ -73,34 +77,41 @@ class SHALSTMforQuestionAnswering(SHALSTM):
             output = output.view(*x.shape, -1)
             return output, h, new_hidden, new_mems
 
-    def conditional_generate(self, initial_prompt, eos_id=2, max_length=24, use_sampling=True, top_p=0.95, temperature=1.0):
-        """ initial_prompt sequence has shape [seq length] """
+    def conditional_generate(self, input, attention_mask, type_ids, eos_id=2, max_length=64, use_sampling=False, top_p=0.95, temperature=1.0):
+        """ input sequence has shape [seq length, batch size] """
 
-        sequence = []
-        prompt = torch.tensor(initial_prompt + [eos_id,], dtype=torch.long).view(-1, 1)
+        prompt = torch.cat([input, torch.zeros(1, input.shape[1], dtype=torch.long)])
+        attention_mask = torch.cat([attention_mask, torch.ones(1, attention_mask.shape[1])])
+        type_ids = torch.cat([type_ids, torch.zeros(1, type_ids.shape[1])])
 
         self.eval()
+        sequences = torch.zeros(max_length, input.shape[1], dtype=torch.long)
         hidden, mems = None, None
         with torch.no_grad():
-            if initial_prompt is not None:
-                output, h,  hidden, mems = self(prompt, hidden=hidden, mems=mems)
-                prompt = prompt[-2:]
+            output, h,  hidden, mems = self(prompt[:-1], attention_mask=attention_mask[:-1], type_ids=type_ids[:-1], hidden=hidden, mems=mems)
+            
+            prompt = prompt[-2:]
+            attention_mask=attention_mask[-2:]
+            type_ids=type_ids[-2:]
 
             for i in range(max_length):
-                output, h, hidden, mems = self(prompt, hidden=hidden, mems=mems)
+                output, h,  hidden, mems = self(prompt, attention_mask=attention_mask, type_ids=type_ids, hidden=hidden, mems=mems)
 
                 if use_sampling:
+                    raise NotImplementedError
                     token_weights = top_k_top_p_filtering(torch.exp(output.view(-1)) / temperature, top_p=top_p, filter_value=0.0)
                     output_idx = torch.multinomial(token_weights, num_samples=1)[0]
+                
                 else:
-                    output_idx = torch.argmax(output.view(-1))
+                    output_idx = torch.argmax(output, dim=-1)
 
-                prompt.fill_(output_idx)
-                sequence.append(output_idx.item())
-                if output_idx == eos_id:
+                prompt[0, :] = output_idx
+                sequences[i, :] = output_idx
+
+                if torch.all(output_idx == eos_id):
                     break
 
-        return sequence
+        return sequences
 
 if __name__ == "__main__":
     import argparse

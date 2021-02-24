@@ -14,6 +14,9 @@ def main(args):
     print("ignore_first_batch:", args.ignore_first_batch)
 
     model = SHALSTM.from_pretrained(args.model, device=device)
+    
+    print("No of parameters", sum(p.numel() for p in model.parameters()))
+    
     loss, length = evaluate_dir(model, args.data_dir, args.batch_size, ignore_first_batch=args.ignore_first_batch, seq_len=args.bptt, return_len=True, device=device)
 
     print('Unnormalized evaluation results')
