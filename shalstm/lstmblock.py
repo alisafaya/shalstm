@@ -6,13 +6,21 @@ import torch.nn.functional as F
 
 from .attention import Attention, FForwardNetwork
 
-
 class LSTMBlock(nn.Module):
     """LSTM Block (lstm -> attention (optional) -> feedforward network)"""
-    def __init__(self, input_size, fforward_size, dropout=0.1, use_attn=False, device=torch.device("cpu")):
+    def __init__(self, input_size, fforward_size, rnn="lstm", dropout=0.1, use_attn=False, device=torch.device("cpu")):
         super(LSTMBlock, self).__init__()
+        
+        if rnn == "lstm":
+            self.lstm = nn.LSTM(input_size=input_size, hidden_size=input_size)
+        elif rnn == "gru":
+            self.lstm = nn.GRU(input_size=input_size, hidden_size=input_size)
+        elif rnn == "sru":
+            from sru import SRU
+            self.lstm = SRU(input_size=input_size, hidden_size=input_size, num_layers=2, amp_recurrence_fp16=True)
+        else:
+            raise TypeError("rnn type should be one of lstm, gru, sru")
 
-        self.lstm = nn.LSTM(input_size=input_size, hidden_size=input_size, batch_first=False)
         self.attn = Attention(input_size, dropout=dropout, device=device) if use_attn else None
         self.fforward = FForwardNetwork(input_size, fforward_size, dropout=dropout, device=device)
 
@@ -34,11 +42,13 @@ class LSTMBlock(nn.Module):
         # normalize the input of the block
         h = self.ln_input(h)
 
-        # pass through lstm
-        lstm_output, lstm_hidden = self.lstm(h, None if hidden is None else tuple(x.to(self.device) for x in hidden))
-        
-        # detach hidden
-        new_hidden = (lstm_hidden[0].detach(), lstm_hidden[1].detach())
+        # pass through rnn and detach hidden
+        if type(self.lstm) == nn.LSTM:
+            lstm_output, lstm_hidden = self.lstm(h, None if hidden is None else tuple(x.to(self.device) for x in hidden))
+            new_hidden = (lstm_hidden[0].detach(), lstm_hidden[1].detach())
+        else:
+            lstm_output, lstm_hidden = self.lstm(h, None if hidden is None else hidden.to(self.device))
+            new_hidden = lstm_hidden.detach()
         
         # lstm output dropout
         if self.dropout is not None:

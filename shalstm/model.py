@@ -27,9 +27,9 @@ class SHALSTM(nn.Module):
         self.ate = AdaptiveTiedEmbeddings(self.embed_size, self.vocab_size, cutoffs, device=device)
 
         self.blocks = nn.ModuleList()
-        for idx in range(self.no_layers):
+        for idx in range(1, self.no_layers + 1):
             # place only one attention head on the layer before the last layer
-            self.blocks.append(LSTMBlock(self.embed_size, self.hidden_size, dropout=self.dropouth, use_attn=True if idx == self.no_layers - 2 else False, device=device))
+            self.blocks.append(LSTMBlock(self.embed_size, self.hidden_size, rnn=self.rnn_type, dropout=self.dropouth, use_attn=idx in self.attn_layers, device=device))
 
         self.apply(self.init_weights)
 
@@ -53,6 +53,8 @@ class SHALSTM(nn.Module):
             self.dropouto = config.get("dropouto", 0.1)
             self.dropouth = config.get("dropouth", 0.1)
             self.vocab_size = config.get("vocab_size", 2**14)
+            self.attn_layers = config.get("attn_layers", [3])
+            self.rnn_type = config.get("rnn_type", "lstm")
         elif isinstance(config, str):
             config = json.loads(open(config).read())
             self.load_config(config)

@@ -2,27 +2,33 @@
 import random
 import json
 import argparse
+import string
+import re
 
 import numpy as np
 import torch.nn as nn
 import torch
 
-from tokenizer import SHALSTMTokenizer
-from qa.model import SHALSTMforQuestionAnswering 
+from ..tokenizer import SHALSTMTokenizer
+from .model import SHALSTMforQuestionAnswering 
 
 from datasets import load_metric
 from sklearn.metrics import classification_report, accuracy_score, f1_score
+from nltk import edit_distance
 
 def chunks(lst, n):
     """Yield successive n-sized chunks from lst."""
     for i in range(0, len(lst), n):
         yield lst[i:i + n]
 
-def load_dataset_with_ids(datadir, tokenizer, ans_dir="", batch_size=32):
+def load_dataset_with_ids(datadir, tokenizer, ans_dir="", batch_size=32, mc=False):
 
     with open(datadir) as fi:
         lines = fi.read().splitlines()
         questions, answers = tuple(np.array(x) for x in zip(*[ l.split("\t") for l in lines ]))
+        
+        if mc:
+            choice_list = np.array([ re.split('\s+\([A-I]\)\s+', q.split("\\n")[1]) for q in questions ], dtype=object)
 
     if ans_dir == "":
         gold_answers = np.array(answers)
@@ -37,12 +43,19 @@ def load_dataset_with_ids(datadir, tokenizer, ans_dir="", batch_size=32):
     questions = list(chunks(list(questions[indices]), batch_size))
     answers = list(chunks(list(answers[indices]), batch_size))
     gold_answers = list(gold_answers[indices])
+    
+    if mc:
+        choice_list = list(choice_list[indices])
 
     batches = []
     for q, a in zip(questions, answers):
         batches.append(tokenizer.encode_for_qa(q, a))
 
+    if mc:
+        return batches, gold_answers, choice_list
+        
     return batches, gold_answers
+
 
 
 def get_predictions(
@@ -63,6 +76,25 @@ def get_predictions(
 
     return predictions
 
+def normalize_answer(s):
+    def remove_articles(text):
+        return re.sub(r'\b(a|an|the)\b', ' ', text)
+    def white_space_fix(text):
+        return ' '.join(text.split())
+    def remove_punc(text):
+        exclude = set(string.punctuation)
+        return ''.join(ch for ch in text if ch not in exclude)
+    def lower(text):
+        return text.lower()
+    return white_space_fix(remove_articles(remove_punc(lower(s))))
+
+def normalize_set(s):
+    return list(map(normalize_answer, s))
+
+def get_nearest_choice(args):
+    pred, possible_choices = args
+    dists = [ edit_distance(pred, c) for c in possible_choices ]
+    return possible_choices[dists.index(min(dists))]
 
 def main(args):
 
@@ -72,7 +104,12 @@ def main(args):
     model = SHALSTMforQuestionAnswering.from_pretrained(args.model, device=torch.device(args.device))
     tokenizer = SHALSTMTokenizer.from_file(args.tokenizer)
 
-    val_data, val_gold = load_dataset_with_ids(args.val_dir, tokenizer, ans_dir=args.val_ans, batch_size=args.batch_size)
+    if args.metric == "mc":
+        val_data, val_gold, choice_list = load_dataset_with_ids(args.val_dir, tokenizer, ans_dir=args.val_ans, batch_size=args.batch_size, mc=True)
+        choice_list = list(map(normalize_set, choice_list))
+    else:
+        val_data, val_gold = load_dataset_with_ids(args.val_dir, tokenizer, ans_dir=args.val_ans, batch_size=args.batch_size)
+    
     predictions = get_predictions(model, val_data, use_amp=use_amp)
 
     decoded = tokenizer.decode_batch(predictions)
@@ -101,14 +138,18 @@ def main(args):
         ## NarrativeQA, 
         metric = load_metric("rouge")
         results = metric.compute(predictions=decoded, references=val_gold)
-        print(results["rougeL"])
+        print(results["rougeL"].mid)
 
-    elif args.metric == "f1":
+    elif args.metric == "mc":
 
-        predictions = decoded
-        references = val_gold
-        print(f1_score(references, predictions))
+        decoded = list(map(get_nearest_choice, zip(decoded, choice_list)))
+        predictions = normalize_set(decoded)
+        references = normalize_set(val_gold)
+        print(accuracy_score(references, predictions))
 
+        with open("pred.json", "w") as fo:
+            fo.write(json.dumps(list(zip(choice_list, references, predictions)), ensure_ascii=False, indent=2))
+        
     elif args.metric == "accuracy":
         ## BoolQ
 
@@ -116,8 +157,7 @@ def main(args):
         references = val_gold
         print(accuracy_score(references, predictions))
 
-        with open("pred.json", "w") as fo:
-            fo.write(json.dumps(list(zip(references, predictions)), ensure_ascii=False, indent=2))
+
     
 if __name__ == "__main__":
     

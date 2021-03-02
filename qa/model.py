@@ -1,8 +1,8 @@
 import torch.nn as nn
 import torch
 
-from shalstm import SHALSTM
-from shalstm.utils import top_k_top_p_filtering
+from ..shalstm import SHALSTM
+from ..shalstm.utils import top_k_top_p_filtering
 
 class SHALSTMforQuestionAnswering(SHALSTM):
 

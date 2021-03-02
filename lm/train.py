@@ -247,15 +247,24 @@ def main(args):
     if args.device == "cuda":
         torch.cuda.manual_seed(args.seed)
 
-    model = SHALSTM(args.model_config, device=device)
+    import json
+    model_config = json.loads(open(args.model_config).read())
+    
+    model_config["vocab_size"] = args.vocab_size
+    model_config["attn_layers"] = [ int(i) for i in args.attn_layers.split(",") ]
+    model_config["no_layers"] = args.no_layers
+    model_config["rnn_type"] = args.rnn
+
+    model = SHALSTM(model_config, device=device)
 
     # start from checkpoint
-    if args.load_checkpoint and rank == 0:
+    best_loss, global_step = 1e3, args.global_step
+    if args.load_checkpoint:
         model.load(args.load_checkpoint)
         print(f"Loaded checkpoint model", args.load_checkpoint)
 
     model = DummyDDPWrapper(model)
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    scaler = torch.cuda.amp.GradScaler(init_scale=4096, growth_factor=2, backoff_factor=0.5, growth_interval=5000, enabled=use_amp)
     
     from apex.optimizers import FusedLAMB
     
@@ -264,7 +273,6 @@ def main(args):
 
     writer = SummaryWriter(args.writer_dir)
 
-    best_loss, global_step = 1e3, 0
     for epoch in range(args.epochs):
         for batch_path in batches:
 
@@ -326,10 +334,15 @@ if __name__ == "__main__":
     parser.add_argument("--test_dir", type=str, required=True)
 
     parser.add_argument("--checkpoint_path", type=str, default="bin/enwik8/base/base")
+    parser.add_argument("--writer_dir", type=str, default="runs/enwik8-base")
     parser.add_argument("--load_checkpoint", type=str, default="")
+    parser.add_argument("--global_step", type=int, default=0)
 
     parser.add_argument("--model_config", type=str, default="config/base.json")
-    parser.add_argument("--writer_dir", type=str, default="runs/enwik8-base")
+    parser.add_argument("--vocab_size", type=int, default=2**14)
+    parser.add_argument("--attn_layers", type=str, default="3")
+    parser.add_argument("--no_layers", type=int, default=4)
+    parser.add_argument("--rnn", type=str, default="lstm")
 
     args = parser.parse_args()
 
