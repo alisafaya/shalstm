@@ -3,7 +3,9 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+# from apex.normalization.fused_layer_norm import FusedLayerNorm as LayerNorm
+from torch.nn import LayerNorm
+from fast_transformers.attention import LinearAttention
 
 class FForwardNetwork(nn.Module):
     """Feed forward network or Boom layer as Smerity names it"""
@@ -30,8 +32,6 @@ class FForwardNetwork(nn.Module):
         
         x = self.linear2(x)
 
-        # assert not x.isnan().any()
-
         return x
 
 
@@ -57,22 +57,19 @@ class Attention(nn.Module):
         self.hidden_size = hidden_size
 
         # gates
-        # self.query_gate = nn.Parameter(torch.zeros(size=(1, 1, hidden_size), dtype=torch.float))
-        # self.key_gate = nn.Parameter(torch.zeros(size=(1, 1, hidden_size), dtype=torch.float))
-        # self.value_gate = nn.Parameter(torch.zeros(size=(1, 1, hidden_size), dtype=torch.float))
+        self.query_gate = nn.Parameter(torch.zeros(size=(1, 1, hidden_size), dtype=torch.float))
+        self.key_gate = nn.Parameter(torch.zeros(size=(1, 1, hidden_size), dtype=torch.float))
+        self.value_gate = nn.Parameter(torch.zeros(size=(1, 1, hidden_size), dtype=torch.float))
         
-        self.query_gate = nn.Parameter(torch.randn(size=(1, 1, hidden_size), dtype=torch.float) * 1e-3)
-        self.key_gate = nn.Parameter(torch.randn(size=(1, 1, hidden_size), dtype=torch.float) * 1e-3)
-        self.value_gate = nn.Parameter(torch.randn(size=(1, 1, hidden_size), dtype=torch.float) * 1e-3)
-
         # over parameterized values gate
-        # self.overparameterize = Overparam(hidden_size, device=device)
-        self.overparameterize = FForwardNetwork(hidden_size, feedforward_size=hidden_size*2, dropout=dropout, activation=nn.Tanh(), device=device)
-        self.ln_overparam = nn.LayerNorm(hidden_size, eps=1e-12)
+        self.overparameterize = Overparam(hidden_size, device=device)
+
+#         self.overparameterize = FForwardNetwork(hidden_size, feedforward_size=hidden_size*2, dropout=dropout, activation=nn.Tanh(), device=device)
+#         self.ln_overparam = LayerNorm(hidden_size, eps=1e-12)
 
         # only applies to query
         self.affine_query = nn.Linear(hidden_size, hidden_size)
-        self.ln_query = nn.LayerNorm(hidden_size, eps=1e-12)
+        self.ln_query = LayerNorm(hidden_size, eps=1e-12)
 
         # used during evaluation to avoid unnecessary computation
         self.gated_qs = None
@@ -110,17 +107,21 @@ class Attention(nn.Module):
         query, key, value, attn_mask = query.to(self.device), key.to(self.device), value.to(self.device), attn_mask.to(self.device)
         # (q, k, v)_seq_len, batch_size, hidden_size 
 
-        if self.training or self.gated_qs is None:
-            # recalculate gates values to update them.
-            self.gated_qs, self.gated_ks, self.gated_vs = torch.sigmoid(self.query_gate), torch.sigmoid(self.key_gate), torch.sigmoid(self.value_gate)
-            self.gated_vs = self.ln_overparam(self.overparameterize(self.gated_vs))
+        with torch.cuda.amp.autocast(enabled=False):
+            if self.training or self.gated_qs is None:
+                # recalculate gates values to update them.
+                self.gated_qs, self.gated_ks, self.gated_vs = torch.sigmoid(self.query_gate), torch.sigmoid(self.key_gate), torch.sigmoid(self.value_gate)
+                self.gated_vs = self.overparameterize(self.gated_vs)
+    #             self.gated_vs = self.ln_overparam(self.overparameterize(self.gated_vs))
 
-        # apply transformation on query        
-        query = self.affine_query(query)
-        query = self.ln_query(query)
+            # apply transformation on query        
+            query = self.affine_query(query)
+            query = self.ln_query(query)
 
-        # apply gates on all attention inputs
-        query, key, value = self.gated_qs * query, self.gated_ks * key, self.gated_vs * value
+            # apply gates on all attention inputs
+
+            query, key, value = self.gated_qs * query, self.gated_ks * key, self.gated_vs * value
+
         query, key, value = query.transpose(0, 1), key.transpose(0, 1), value.transpose(0, 1)
 
         batch_size, query_len, hidden_size = query.size()
@@ -131,8 +132,5 @@ class Attention(nn.Module):
 
         output = self.attention(query, key, value, attn_mask=attn_mask)
         output = output.transpose(1, 2).contiguous().view(batch_size, -1, self.hidden_size).transpose(0, 1)
-
-        if output.isnan().any():
-            import ipdb; ipdb.set_trace()
 
         return output

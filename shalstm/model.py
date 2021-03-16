@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 from .lstmblock import LSTMBlock
 from .adaptive import AdaptiveTiedEmbeddings
+from .splitsoftmax import SplitSoftmaxWithLoss
 from .utils import top_k_top_p_filtering
 
 class SHALSTM(nn.Module):
@@ -20,11 +21,17 @@ class SHALSTM(nn.Module):
         self.odrop = nn.Dropout(self.dropouto)
 
         # Cutoffs list calculation could be better than this
-        start = 4 + int(np.ceil(np.log2(self.vocab_size / 8) / 2))
-        cutoffs = [ 2**x for x in range(start, start + 5, 2) if self.vocab_size > 2**x ]
+        if self.vocab_size > 1024:
+            start = 4 + int(np.ceil(np.log2(self.vocab_size / 8) / 2))
+            cutoffs = [ 2**x for x in range(start, start + 5, 2) if self.vocab_size > 2**x ]
+        else:
+            cutoffs = []
 
         # used as both encoder and decoder (tied weights)
-        self.ate = AdaptiveTiedEmbeddings(self.embed_size, self.vocab_size, cutoffs, device=device)
+#         self.ate = AdaptiveTiedEmbeddings(self.embed_size, self.vocab_size, cutoffs, device=device)
+
+        self.encoder = nn.Embedding(self.vocab_size, self.embed_size)
+        self.ate = SplitSoftmaxWithLoss(self.embed_size, self.vocab_size, cutoffs, self.encoder.weight).to(device)
 
         self.blocks = nn.ModuleList()
         for idx in range(1, self.no_layers + 1):
@@ -37,8 +44,8 @@ class SHALSTM(nn.Module):
         self.to(device)
 
     def init_weights(self, module):
-        if isinstance(module, (nn.Linear, nn.Embedding, nn.LayerNorm)):
-            module.weight.data.normal_(mean=0.0, std=2 / np.sqrt(self.embed_size))
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            module.weight.data.normal_(mean=0.0, std=0.1 / np.sqrt(self.embed_size))
 
         if isinstance(module, (nn.Linear, nn.LayerNorm)) and module.bias is not None:
             module.bias.data.zero_()
@@ -96,7 +103,7 @@ class SHALSTM(nn.Module):
         x = x.to(self.device)
 
         # encode and dropout input
-        h = self.ate.encode(x)
+        h = self.encoder(x)
         h = self.idrop(h)
 
         # if memory is provided, trim it to fit max memory size
@@ -224,8 +231,8 @@ if __name__ == "__main__":
 
     print("Excecution time =", (time.time() - starttime) / 100, "sec per batch")
 
-    model.save("bin/sample/sample_model")
-    
-    new_model = SHALSTM.from_pretrained("bin/sample/sample_model", device="cuda:0")
-    loss, h, new_hidden, new_mems = new_model(inp[:-1, :], targets=inp[1:, :])
+#     model.save("bin/sample/sample_model")
+#     new_model = SHALSTM.from_pretrained("bin/sample/sample_model", device="cuda:0")
+    loss, h, new_hidden, new_mems = model(inp[:-1, :], targets=inp[1:, :])
     print(loss.data.item())
+    print("No of parameters", sum(p.numel() for p in model.parameters()))

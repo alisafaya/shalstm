@@ -126,6 +126,7 @@ def train(
         static_clip=True,
         history_size=100, # this is used only if static_clip is False 
         use_amp=True,
+        lr_scheduler=None,
         device=torch.device("cuda")
         ):
 
@@ -148,8 +149,9 @@ def train(
         while i < train_data.size(0) - (seq_len + 2):
 
             # warm up
-            ratio = (1 + global_step) / warmup
-            warmup_lr(optimizer, base_lr, min(1.0, ratio))
+            if warmup:
+                ratio = (1 + global_step) / warmup
+                warmup_lr(optimizer, base_lr, min(1.0, ratio))
 
             # randomly cut out memory %5 of the iterations
             if random.randint(0, max(world_size, 20)) == rank:
@@ -193,6 +195,9 @@ def train(
             # update weights
             if not model.module._check_nan_grads():
                 scaler.step(optimizer)
+                if lr_scheduler is not None:
+                    # update lr
+                    lr_scheduler.step()
             
             # update scaler's scale value and other parameters
             scaler.update()
@@ -263,13 +268,14 @@ def main(args):
         model.load(args.load_checkpoint)
         print(f"Loaded checkpoint model", args.load_checkpoint)
 
+    print("No of parameters", sum(p.numel() for p in model.parameters()))
+        
     model = DummyDDPWrapper(model)
-    scaler = torch.cuda.amp.GradScaler(init_scale=4096, growth_factor=2, backoff_factor=0.5, growth_interval=5000, enabled=use_amp)
-    
-    from apex.optimizers import FusedLAMB
-    
-    optimizer = FusedLAMB(model.parameters(), lr=args.base_lr,
-                 max_grad_norm=args.clip_value, use_nvlamb=True)
+#     scaler = torch.cuda.amp.GradScaler(init_scale=4096, growth_factor=2, backoff_factor=0.5, growth_interval=5000, enabled=use_amp)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+
+#     from apex.optimizers import FusedLAMB
+    optimizer = MinTrustLamb(model.parameters(), lr=args.base_lr)
 
     writer = SummaryWriter(args.writer_dir)
 
@@ -300,7 +306,8 @@ def main(args):
         if best_loss > loss:
             model.module.save(args.checkpoint_path)
             best_loss = loss
-        else:
+
+        if epoch == int(args.epochs * 0.75):
             args.base_lr /= 2
 
         print(f"Finished epoch {epoch}")

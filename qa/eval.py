@@ -9,7 +9,7 @@ import numpy as np
 import torch.nn as nn
 import torch
 
-from ..tokenizer import SHALSTMTokenizer
+from tokenizer import SHALSTMTokenizer
 from .model import SHALSTMforQuestionAnswering 
 
 from datasets import load_metric
