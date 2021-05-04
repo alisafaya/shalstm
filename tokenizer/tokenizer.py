@@ -43,6 +43,16 @@ class SHALSTMTokenizer(BaseTokenizer):
         return input, attn_mask, type_ids, input_length
 
 
+    def encode_as_tensors(self, data):
+
+        encodings = self.encode_batch(data, add_special_tokens=True)
+
+        input = torch.stack([torch.tensor(x.ids) for x in encodings], dim=1)
+        attn_mask = torch.stack([torch.tensor(x.attention_mask) for x in encodings], dim=1)
+
+        return input, attn_mask
+
+
 if __name__ == '__main__':
     tokenizer = SHALSTMTokenizer.from_file("tokenizer/tokenizer.json")
 

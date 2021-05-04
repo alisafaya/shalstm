@@ -27,35 +27,41 @@ class SHALSTMforQuestionAnswering(SHALSTM):
         loss_mask = type_ids[1:].view(-1).to(self.device)
 
         # encode and dropout input
-        h = self.ate.encode(x)
+        h = self.encoder(x)
         h = self.idrop(h)
 
         # if memory is provided, trim it to fit max memory size
-        if mems is not None:
-            maxmem = self.memory_size - len(h)
-            mems = [m[-maxmem:] for m in mems]
-        total_length = len(x) + (len(mems[0]) if mems else 0)
+        if attention_mask is None:
+            attn_mask = torch.full((seq_len, seq_len), -1e6, device=h.device, dtype=h.dtype) # instead of -Inf we use -1,000,000
+            attn_mask = torch.triu(attn_mask, diagonal=1)
+            
+            # concatenate memories from the previous pass if provided
+            if mems is not None:
+                max_mems = max(len(m) for m in mems)
+                mem_mask = torch.zeros((seq_len, max_mems), device=h.device, dtype=h.dtype)
+                attn_mask = torch.cat([mem_mask, attn_mask], dim=-1)
+        
+        else:
+            attention_mask = attention_mask.to(self.device)
+            attn_mask = torch.full((batch_size, seq_len, seq_len), -1e6, device=self.device, dtype=h.dtype)
+            attn_mask = torch.triu(attn_mask, diagonal=1)
+            for b in range(batch_size):
+                mask = torch.where(attention_mask[:-1, b] == 0) 
+                attn_mask[b, :, mask[0]] = -1e6
+                attn_mask[b, mask[0], :] = -1e6
 
-        # construct attention mask:
-        attn_mask = torch.full((batch_size, seq_len, seq_len), -1e6, device=self.device, dtype=h.dtype) # instead of -Inf we use -1,000,000
-        attn_mask = torch.triu(attn_mask, diagonal=1)
-        for b in range(batch_size):
-            mask = torch.where(attention_mask[:-1, b] == 0) 
-            attn_mask[b, :, mask[0]] = -1e6
-            attn_mask[b, mask[0], :] = -1e6
+            # concatenate memories from the previous pass if provided
+            if mems is not None:
+                max_mems = max(len(m) for m in mems)
+                mem_mask = torch.zeros((batch_size, seq_len, max_mems), device=h.device, dtype=h.dtype)
+                attn_mask = torch.cat([mem_mask, attn_mask], dim=-1)
 
-        # concatenate memories from the previous pass if provided
-        if mems is not None:
-            max_mems = max(len(m) for m in mems)
-            mem_mask = torch.zeros((batch_size, seq_len, max_mems), device=h.device, dtype=h.dtype)
-            attn_mask = torch.cat([mem_mask, attn_mask], dim=2)
 
         # iterate over blocks
         new_hidden, new_mems = [], []
         for idx, block in enumerate(self.blocks):
             mem = mems[idx] if mems is not None else None
             hid = hidden[idx] if hidden is not None else None
-
             h, new_mem, new_hid = block(h, attn_mask, self.memory_size, memory=mem, hidden=hid)
             new_hidden.append(new_hid)
             new_mems.append(new_mem)
@@ -66,14 +72,14 @@ class SHALSTMforQuestionAnswering(SHALSTM):
         if return_loss:
             if not lm_loss:
                 # calculate loss targets are provided
-                loss = -(self.ate(h.view(-1, self.embed_size), input[1:].to(self.device).view(-1)).output * loss_mask).mean() # .view(*x.shape).mean(0).mean()
+                loss = -(self.splitloss(h.view(-1, self.embed_size), input[1:].to(self.device).view(-1)).output * loss_mask).mean() # .view(*x.shape).mean(0).mean()
             else:
                 # calculate loss on all tokens
                 loss = self.ate(h.view(-1, self.embed_size), input[1:].to(self.device).view(-1)).loss
             return loss, h, new_hidden, new_mems
         else:
             # calculate predictions
-            output = self.ate.log_prob(h.view(-1, self.embed_size))
+            output = self.splitloss.log_prob(h.view(-1, self.embed_size))
             output = output.view(*x.shape, -1)
             return output, h, new_hidden, new_mems
 
@@ -139,7 +145,7 @@ if __name__ == "__main__":
     ]
 
     input, attn_mask, type_ids, input_length = tokenizer.encode_for_qa(questions, answers)
-
+    
     loss, h, hidden, mems = model(input, attn_mask, type_ids, return_loss=True)
 
     warmup = 5
@@ -194,7 +200,7 @@ if __name__ == "__main__":
     print(tokenizer.decode(ids[0]))
     print(tokenizer.decode(ids[1]))
 
-    sequence = model.conditional_generate(tokenizer.encode("another thing there").ids, max_length=10, use_sampling=False)
+    sequence = model.conditional_generate(torch.tensor(tokenizer.encode("another thing there").ids), attn_mask, type_ids, max_length=10, use_sampling=False)
     
     print("Conditional generation")
     print(tokenizer.decode(sequence))
@@ -204,21 +210,3 @@ if __name__ == "__main__":
 #     In [54]: for x in attn_mask[0]:
 #     ...:     print("".join([ f"{y:10.1f}" for y in x.tolist()]))
 #     ...:
-
-# -1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0
-# -1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0
-# -1000000.0-1000000.0       0.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0
-# -1000000.0-1000000.0       0.0       0.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0
-# -1000000.0-1000000.0       0.0       0.0       0.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0
-# -1000000.0-1000000.0       0.0       0.0       0.0       0.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0
-# -1000000.0-1000000.0       0.0       0.0       0.0       0.0       0.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0
-# -1000000.0-1000000.0       0.0       0.0       0.0       0.0       0.0       0.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0
-# -1000000.0-1000000.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0
-# -1000000.0-1000000.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0
-# -1000000.0-1000000.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0
-# -1000000.0-1000000.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0
-# -1000000.0-1000000.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0-1000000.0-1000000.0-1000000.0-1000000.0
-# -1000000.0-1000000.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0-1000000.0-1000000.0-1000000.0
-# -1000000.0-1000000.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0-1000000.0-1000000.0
-# -1000000.0-1000000.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0-1000000.0
-# -1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0-1000000.0

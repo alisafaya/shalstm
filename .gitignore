@@ -2,7 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
+*runs/
 # Jupyter Notebook
 .ipynb_checkpoints
 

@@ -15,6 +15,9 @@ from tensorboardX import SummaryWriter
 from shalstm.model import SHALSTM
 from shalstm.optim import MinTrustLamb
 
+from apex import amp
+
+
 def batchify(data, batch_size):
     # Work out how cleanly we can divide the dataset into batch_size parts.
     nbatch = data.size(0) // batch_size
@@ -91,8 +94,7 @@ def evaluate(model, batch_path, batch_size, ignore_first_batch=False, hidden=Non
             data, targets = get_batch(eval_data, i, seq_len=seq_len)
             
             # calculate loss
-            with torch.cuda.amp.autocast(enabled=use_amp):
-                loss, output, h, m = model(data, hidden=hidden, mems=mems, targets=targets)
+            loss, output, h, m = model(data, hidden=hidden, mems=mems, targets=targets)
             
             if hidden is not None or not ignore_first_batch:
                 total_loss += loss.item() * len(data)
@@ -165,44 +167,36 @@ def train(
                 data, targets = get_batch(train_data, i, seq_len=seq_len)
             
             # zero out gradients
-            model.zero_grad()
+            optimizer.zero_grad()
 
             # calculate loss
-            with torch.cuda.amp.autocast(enabled=use_amp):
-                loss, output, hidden, mems = model(data, hidden=hidden, mems=mems, targets=targets)
+            loss, output, hidden, mems = model(data, hidden=hidden, mems=mems, targets=targets)
+            with amp.scale_loss(loss, optimizer) as scaled_loss:
+                scaled_loss.backward()
 
-            # do backward pass
-            scaler.scale(loss).backward()
-            
             # debug step
             if model.module._check_nan_grads():
                 print("NaN gradients detected, logging...")
                 print(f"i={i}, minibatch={minibatch}, batch_path={batch_path}, global_step={global_step}")
 
-            scaler.unscale_(optimizer)
-
             # calculate dynamic gradient clip threshold
-            obs_grad_norm = model.module._get_grad_norm()
-            
             if not static_clip:
+                obs_grad_norm = model.module._get_grad_norm()
                 grad_history.append(obs_grad_norm)
                 grad_history = grad_history[-history_size:]
                 clip_value = np.mean(grad_history)  
 
             # clip gradients
             if clip_value != -1:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
+                torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), clip_value)
 
             # update weights
             if not model.module._check_nan_grads():
-                scaler.step(optimizer)
+                optimizer.step()
                 if lr_scheduler is not None:
                     # update lr
                     lr_scheduler.step()
             
-            # update scaler's scale value and other parameters
-            scaler.update()
-
             total_loss += loss.item()
             if minibatch % log_interval == 0 and minibatch > 0:
 
@@ -213,8 +207,7 @@ def train(
 
                 if writer is not None:
                     writer.add_scalar('training/loss', cur_loss, global_step + shift)
-                    writer.add_scalar('training/gnorm', obs_grad_norm, global_step + shift)
-                    writer.add_scalar('training/scale', scaler.get_scale(), global_step + shift)
+                    writer.add_scalar('training/scale', amp.state_dict()["loss_scaler0"]["loss_scale"], global_step + shift)
                     writer.add_scalar('training/ppl', ppl, global_step + shift)
                     writer.add_scalar('training/bpt', bpt, global_step + shift)
                     writer.add_scalar('training/lr', lr, global_step + shift)
@@ -261,7 +254,7 @@ def main(args):
     model_config["attn_layers"] = [ int(i) for i in args.attn_layers.split(",") ]
     model_config["no_layers"] = args.no_layers
     model_config["rnn_type"] = args.rnn
-
+    
     model = SHALSTM(model_config, device=device)
 
     # start from checkpoint
@@ -273,8 +266,10 @@ def main(args):
     print("No of parameters", sum(p.numel() for p in model.parameters()))
         
     model = DummyDDPWrapper(model)
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     optimizer = MinTrustLamb(model.parameters(), lr=args.base_lr)
+
+    model, optimizer = amp.initialize(model, optimizer, opt_level='O1')
+    
     writer = SummaryWriter(args.writer_dir)
 
     for epoch in range(args.epochs):
@@ -286,7 +281,7 @@ def main(args):
                 batch_path,
                 args.batch_size,
                 optimizer,
-                scaler,
+                None,
                 args.base_lr,
                 global_step=global_step,
                 log_interval=args.log_interval,
