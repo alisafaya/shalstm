@@ -32,7 +32,7 @@ task_to_keys = {
     "rte": ("sentence1", "sentence2"),
     "sst2": ("sentence", None),
     "stsb": ("sentence1", "sentence2"),
-    "wnli": ("sentence1", "sentence2"),
+    "wnli": ("sentence1", "sentence2")
 }
 
 
