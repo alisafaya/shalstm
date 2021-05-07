@@ -39,7 +39,6 @@ def run_proc(local_rank, args):
     no_batches = len(glob(args.train_dir + "*.pt"))
     args.evaluate_each = min(args.evaluate_each, no_batches // world_size)
     start = 0
-
     local_batches = [ f"{args.train_dir}batch_{((rank + i) % no_batches ) + 1:0>5}.pt" for i in range(start, args.epochs * world_size * math.ceil(no_batches / world_size), world_size) ]
 
     random.seed(args.seed)
@@ -64,7 +63,7 @@ def run_proc(local_rank, args):
     map_location = {'cuda:%d' % 0: 'cuda:%d' % local_rank}
     model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=map_location))
 
-    scaler = torch.cuda.amp.GradScaler(enabled=True)
+    scaler = torch.cuda.amp.GradScaler(enabled=args.use_amp)
     if args.optimizer == "fused":
         optimizer = FusedLAMB(model.parameters(), lr=args.base_lr, max_grad_norm=args.clip_value, use_nvlamb=True)
     else:

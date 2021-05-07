@@ -281,6 +281,8 @@ def main(args):
             best_loss = val_loss
 
 
+    val_loss, (refs, preds) = validate(model, val_data, loss_fn=loss_fn, use_amp=use_amp)
+
 if __name__ == "__main__":
     
     parser = argparse.ArgumentParser()

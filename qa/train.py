@@ -1,16 +1,17 @@
 import random
 import argparse
 from glob import glob
+from tqdm import tqdm
 
 import numpy as np
 import torch.nn as nn
 import torch
 
 from tokenizer import SHALSTMTokenizer
-from .model import SHALSTMforQuestionAnswering 
+from .model import SHALSTMforQuestionAnswering
+from shalstm.optim import MinTrustLamb
 from .eval import chunks, load_dataset_with_ids, get_predictions
 
-from apex.optimizers import FusedLAMB
 from tensorboardX import SummaryWriter
 from datasets import load_metric
 
@@ -22,16 +23,28 @@ def load_states_from_checkpoint(checkpoint, model=None, optimizer=None, scaler=N
     if scaler is not None and "scaler" in checkpoint:
         scaler.load_state_dict(checkpoint["scaler"])
 
-def load_tsv_dataset(dir, tokenizer, batch_size=32):
+def load_tsv_dataset(dir, tokenizer, batch_size=32, source_length=1536, target_length=64):
 
-    lines = []
-    for f in glob(dir):
-        with open(f) as fi:
-            lines += fi.read().splitlines()
+    with open(dir) as fi:
+        lines = fi.read().splitlines()
+
+    ###        
+    lines = lines[:50000]
+    ###
 
     random.shuffle(lines)
+    
+    questions, answers = [], []
+    for l in lines:
+        if len(l.split("\t")) == 2:
+            q, a = l.split("\t")
+            questions.append(q)
+            answers.append(a)
 
-    questions, answers = tuple(np.array(x) for x in zip(*[ l.split("\t") for l in lines ]))
+    print("Total", len(questions), "lines")
+    
+    questions = np.array(questions)
+    answers = np.array(answers)
     q_lens = np.array([ len(tokenizer.encode(x)) for x in questions ])
     indices = np.argsort(q_lens)
 
@@ -39,8 +52,8 @@ def load_tsv_dataset(dir, tokenizer, batch_size=32):
     answers = list(chunks(list(answers[indices]), batch_size))
 
     batches = []
-    for q, a in zip(questions, answers):
-        batches.append(tokenizer.encode_for_qa(q, a))
+    for q, a in tqdm(zip(questions, answers), desc='Tokenizing'):
+        batches.append(tokenizer.encode_for_qa(q, a, source_length=source_length, target_length=target_length))
 
     return batches
 
@@ -86,7 +99,7 @@ def train(
     total_loss, minibatch = 0, 0
     model.train()
     
-    for input, attn_mask, type_ids, input_length in train_data:
+    for input, attn_mask, type_ids, input_length in tqdm(train_data, desc='Training'):
 
         # zero out gradients
         model.zero_grad()
@@ -157,15 +170,14 @@ def main(args):
     tokenizer = SHALSTMTokenizer.from_file(args.tokenizer)
 
     train_data = load_tsv_dataset(args.train_dir, tokenizer, batch_size=args.batch_size)
-    val_data = load_tsv_dataset(args.val_dir, tokenizer, batch_size=args.batch_size)
     
+    if args.val_dir:
+        val_data = load_tsv_dataset(args.val_dir, tokenizer, batch_size=args.batch_size)
+
     warmup = args.warmup * len(train_data)
     total_steps = args.epochs * len(train_data)
 
-    if args.device == "cuda":
-        optimizer = FusedLAMB(model.parameters(), lr=args.base_lr, max_grad_norm=args.clip_value, use_nvlamb=True)
-    else:
-        optimizer = MinTrustLamb(model.parameters(), lr=args.base_lr)
+    optimizer = MinTrustLamb(model.parameters(), lr=args.base_lr)
 
     lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=[lambda x: float(x / warmup) if x < warmup else float((total_steps - x) / total_steps)]) # warmup with linear decay
 
@@ -203,8 +215,10 @@ def main(args):
             use_lm_loss=args.pretraining
         )
 
-        val_loss = validate_loss(model, val_data, use_amp=use_amp)
-        writer.add_scalar('validation/loss', val_loss, global_step)
+        if args.val_dir:
+            val_loss = validate_loss(model, val_data, use_amp=use_amp)
+            if writer is not None:
+                writer.add_scalar('validation/loss', val_loss, global_step)
 
         if args.checkpoint_dir:
             print("saving checkpoint...")
@@ -216,8 +230,7 @@ def main(args):
                 'scaler': scaler.state_dict()
             }
 #             torch.save(checkpoint, args.checkpoint_dir + "_" + str(epoch) + ".ckpt")
-
-            best_loss = val_loss
+#             best_loss = val_loss
 
 
 if __name__ == "__main__":
@@ -228,8 +241,8 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--pretraining", action="store_true")
 
-    parser.add_argument("--base_lr", type=float, default=1e-3)
-    parser.add_argument("--clip_value", type=float, default=0.1)
+    parser.add_argument("--base_lr", type=float, default=5e-4)
+    parser.add_argument("--clip_value", type=float, default=0.25)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=32)
 
@@ -241,7 +254,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=5)
 
     parser.add_argument("--train_dir", type=str, required=True)
-    parser.add_argument("--val_dir", type=str, required=True)
+    parser.add_argument("--val_dir", type=str, default="")
 
     parser.add_argument("--writer_dir", type=str, default="")
     parser.add_argument("--load_checkpoint", type=str, default="")

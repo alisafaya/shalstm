@@ -149,8 +149,8 @@ if __name__ == "__main__":
     loss, h, hidden, mems = model(input, attn_mask, type_ids, return_loss=True)
 
     warmup = 5
-    total_steps = 150
-    optimizer = torch.optim.SGD(model.parameters(), lr=1e-1)
+    total_steps = 1500
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-2)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=[lambda x: float(x / warmup) if x < warmup else float((total_steps - x) / total_steps)])
     
     use_amp = False
@@ -197,13 +197,15 @@ if __name__ == "__main__":
         output = torch.argmax(output, dim=-1)
 
     ids = output[input_length - 1:].t().cpu().tolist()
+    ids = output.t().cpu().tolist()
     print(tokenizer.decode(ids[0]))
     print(tokenizer.decode(ids[1]))
 
-    sequence = model.conditional_generate(torch.tensor(tokenizer.encode("another thing there").ids), attn_mask, type_ids, max_length=10, use_sampling=False)
+    input, attn_mask, type_ids, input_length = tokenizer.encode_for_qa(questions, direction='left')
+    sequence = model.conditional_generate(input, attn_mask, type_ids, max_length=10, use_sampling=False)
     
     print("Conditional generation")
-    print(tokenizer.decode(sequence))
+    print(tokenizer.decode_batch(sequence.t().cpu().tolist()))
 
 # Assigning bigger loss to longer sequences
 

@@ -15,7 +15,7 @@ NGPU_PER_NODE=$2
 RANK=$1
 NODERANK=$(($2 * $1))
 
-export OMP_NUM_THREADS=4 # ngpus / nthreads
+export OMP_NUM_THREADS=4 # nthreads / ngpus
 export NCCL_BLOCKING_WAIT=1
 
 ## run

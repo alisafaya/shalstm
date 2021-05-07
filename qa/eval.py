@@ -8,6 +8,7 @@ import re
 import numpy as np
 import torch.nn as nn
 import torch
+from tqdm import tqdm
 
 from tokenizer import SHALSTMTokenizer
 from .model import SHALSTMforQuestionAnswering 
@@ -21,14 +22,17 @@ def chunks(lst, n):
     for i in range(0, len(lst), n):
         yield lst[i:i + n]
 
-def load_dataset_with_ids(datadir, tokenizer, ans_dir="", batch_size=32, mc=False):
+def load_dataset_with_ids(datadir, tokenizer, ans_dir="", batch_size=32, mc=False, source_length=1536, target_length=64):
 
     with open(datadir) as fi:
         lines = fi.read().splitlines()
-        questions, answers = tuple(np.array(x) for x in zip(*[ l.split("\t") for l in lines ]))
+
+#     lines = lines[:100]    
         
-        if mc:
-            choice_list = np.array([ re.split('\s+\([A-I]\)\s+', q.split("\\n")[1]) for q in questions ], dtype=object)
+    questions, answers = tuple(np.array(x) for x in zip(*[ l.split("\t") for l in lines ]))
+        
+    if mc:
+        choice_list = np.array([ re.split('\s+\([A-I]\)\s+', q.split("\\n")[1]) for q in questions ], dtype=object)
 
     if ans_dir == "":
         gold_answers = np.array(answers)
@@ -49,7 +53,7 @@ def load_dataset_with_ids(datadir, tokenizer, ans_dir="", batch_size=32, mc=Fals
 
     batches = []
     for q, a in zip(questions, answers):
-        batches.append(tokenizer.encode_for_qa(q, a))
+        batches.append(tokenizer.encode_for_qa(q, a, source_length=source_length, target_length=target_length))
 
     if mc:
         return batches, gold_answers, choice_list
@@ -61,16 +65,17 @@ def load_dataset_with_ids(datadir, tokenizer, ans_dir="", batch_size=32, mc=Fals
 def get_predictions(
         model,
         val_data,
+        max_length=64,
         use_amp=True
         ):
 
     model.eval()
     predictions = []
     with torch.no_grad():
-        for input, attn_mask, type_ids, input_length in val_data:
+        for input, attn_mask, type_ids, input_length in tqdm(val_data, desc='Predicting'):
             # calculate loss
             with torch.cuda.amp.autocast(enabled=use_amp):
-                output = model.conditional_generate(input[:input_length], attn_mask[:input_length], type_ids[:input_length])
+                output = model.conditional_generate(input[:input_length], attn_mask[:input_length], type_ids[:input_length], max_length=max_length)
 
             predictions += output.t().cpu().tolist()
 
@@ -110,7 +115,7 @@ def main(args):
     else:
         val_data, val_gold = load_dataset_with_ids(args.val_dir, tokenizer, ans_dir=args.val_ans, batch_size=args.batch_size)
     
-    predictions = get_predictions(model, val_data, use_amp=use_amp)
+    predictions = get_predictions(model, val_data, use_amp=use_amp, max_length=args.max_target_length)
 
     decoded = tokenizer.decode_batch(predictions)
     decoded = [ s.split("</s>")[0] for s in decoded ]
@@ -138,7 +143,9 @@ def main(args):
         ## NarrativeQA, 
         metric = load_metric("rouge")
         results = metric.compute(predictions=decoded, references=val_gold)
-        print(results["rougeL"].mid)
+        
+        for k in results:
+            print(k, "\t=\t",results[k].mid.fmeasure)
 
     elif args.metric == "mc":
 
@@ -147,8 +154,8 @@ def main(args):
         references = normalize_set(val_gold)
         print(accuracy_score(references, predictions))
 
-        with open("pred.json", "w") as fo:
-            fo.write(json.dumps(list(zip(choice_list, references, predictions)), ensure_ascii=False, indent=2))
+#         with open("pred.json", "w") as fo:
+#             fo.write(json.dumps(list(zip(choice_list, references, predictions)), ensure_ascii=False, indent=2))
         
     elif args.metric == "accuracy":
         ## BoolQ
@@ -165,6 +172,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--tokenizer", type=str, required=True)
     parser.add_argument("--model", type=str, required=True)
+    parser.add_argument("--max_target_length", type=int, default=64)
 
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--device", type=str, default="cuda")
