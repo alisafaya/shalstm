@@ -17,9 +17,9 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from shalstm.model import SHALSTM
-from apex.optimizers import FusedLAMB
 from shalstm.optim import MinTrustLamb
-from .train import train, evaluate_dir, load_states_from_checkpoint
+from .train_exp import train, evaluate_dir, load_states_from_checkpoint
+from transformers import get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup
 
 from tensorboardX import SummaryWriter
 from glob import glob
@@ -33,13 +33,20 @@ def run_proc(local_rank, args):
     device = torch.device(device_ids[0])
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    
+    use_amp = args.no_amp
+
     print(f"Initialized process {local_rank}, with devices {device_ids}, global rank {rank}\n")
 
-    no_batches = len(glob(args.train_dir + "*.pt"))
-    args.evaluate_each = min(args.evaluate_each, no_batches // world_size)
-    start = 0
-    local_batches = [ f"{args.train_dir}batch_{((rank + i) % no_batches ) + 1:0>5}.pt" for i in range(start, args.epochs * world_size * math.ceil(no_batches / world_size), world_size) ]
+    all_batches = sorted(glob(args.train_dir))
+    no_batches = int(np.ceil(len(all_batches) / world_size))
+
+    if rank == (world_size - 1):
+        local_batches = all_batches[local_rank * no_batches:]
+        local_batches += all_batches[:no_batches - len(local_batches)]
+    else:    
+        local_batches = all_batches[local_rank * no_batches: (local_rank + 1) * no_batches]
+
+    print(f"Initialized process {local_rank}\n", local_batches)
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -49,12 +56,12 @@ def run_proc(local_rank, args):
     model = SHALSTM(args.model_config, device=device)
     global_step = 0
 
-    model = DDP(model, device_ids)
+    model = DDP(model, device_ids, find_unused_parameters=True)
     print(f"[{os.getpid()}] initialized ddp model.")
-
     CHECKPOINT_PATH = args.checkpoint_path + ".init.pt"
 
     if rank == 0:
+        print(args)
         torch.save(model.state_dict(), CHECKPOINT_PATH)
         print(f"[{os.getpid()}] Saved initialized model.")
 
@@ -63,83 +70,79 @@ def run_proc(local_rank, args):
     map_location = {'cuda:%d' % 0: 'cuda:%d' % local_rank}
     model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=map_location))
 
-    scaler = torch.cuda.amp.GradScaler(enabled=args.use_amp)
-    if args.optimizer == "fused":
-        optimizer = FusedLAMB(model.parameters(), lr=args.base_lr, max_grad_norm=args.clip_value, use_nvlamb=True)
-    else:
-        optimizer = MinTrustLamb(model.parameters(), lr=args.base_lr)
-
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    optimizer = MinTrustLamb(model.parameters(), lr=args.base_lr)
+    lr_scheduler = get_cosine_schedule_with_warmup(optimizer,
+                                                    num_warmup_steps = args.warmup,
+                                                    num_training_steps = args.max_steps,
+                                                    num_cycles = 0.25
+                                )
     # start from checkpoint
     if args.load_checkpoint:
-        load_states_from_checkpoint(torch.load(args.load_checkpoint), model, optimizer, scaler)
-        global_step = optimizer.state[0]["step"]
+        load_states_from_checkpoint(torch.load(args.load_checkpoint, map_location=map_location), model, optimizer, scaler, lr_scheduler)
+        global_step = next(iter(optimizer.state.values()))["step"]
         print(f"[{os.getpid()}] Loaded checkpoint model", args.load_checkpoint)
         print(f"[{os.getpid()}] Starting with global step =", global_step)
+        dist.barrier()
 
     if rank == 0:
         writer = SummaryWriter(args.writer_dir)
     else:
         writer = None
 
-    print(f"rank = {rank}, no batches = {no_batches}")
+    print(f"rank = {local_rank}, no batches = {no_batches}")
+    for epoch in range(1, args.epochs + 1):
+        print(f"Starting epoch = {epoch}")
+        for i, batch_path in enumerate(local_batches):
+            print(f"Loading {batch_path}")
 
-    epoch = 1
-    for i, batch_path in enumerate(local_batches):
-        print(f"Loading {batch_path}")
+            # global step is just a counter of batches
+            global_step = train(
+                model,
+                batch_path,
+                optimizer,
+                scaler,
+                val_dir=args.val_dir,
+                global_step=global_step,
+                eval_steps=args.evaluate_each,
+                max_steps=args.max_steps,
+                log_interval=args.log_interval,
+                clip_value=args.clip_value,
+                seq_len=args.bptt,
+                writer=writer,
+                use_amp=use_amp,
+                device=device,
+                lr_scheduler=lr_scheduler,
+                checkpoint_path=args.checkpoint_path,
+                rank=rank,
+                dist=dist
+            )
 
-        # global step is just a counter of batches
-        global_step = train(
-            model,
-            batch_path,
-            args.batch_size,
-            optimizer,
-            scaler,
-            args.base_lr,
-            world_size=world_size,
-            rank=rank,
-            global_step=global_step,
-            log_interval=args.log_interval,
-            clip_value=args.clip_value if args.optimizer != "fused" else -1,
-            seq_len=args.bptt,
-            warmup=args.warmup,
-            writer=writer,
-            device=device
-        )
+            if global_step >= args.max_steps:
+                break
 
-
-        if rank == 0:
-            if i % args.evaluate_each == 0 and i > 0:
-                # evaluate_dir(model.module, args.val_dir + "*.pt", args.batch_size, set="val", writer=writer, global_step=global_step, seq_len=args.bptt, device=device)
-                pass
-
-            model.module.save(args.checkpoint_path + f"_{global_step}")
+        if local_rank == 0:
+            print(f"Finished epoch = {epoch}")
 
             checkpoint = {
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
-                'scaler': scaler.state_dict()
+                'scaler': scaler.state_dict(),
+                'scheduler': lr_scheduler.state_dict()
             }
 
-            torch.save(checkpoint, CHECKPOINT_PATH)
-
-        dist.barrier()
+            model.module.save(args.checkpoint_path + f"_{global_step}")
+            torch.save(checkpoint, args.checkpoint_path + f"_last.ckpt")
+            evaluate_dir(model.module, args.val_dir, set="val", writer=writer, global_step=global_step, seq_len=args.bptt, use_amp=use_amp)
 
         # resync model, optimizer, scaler on all gpus (just to make sure)
+        dist.barrier()
         map_location = {'cuda:%d' % 0: 'cuda:%d' % local_rank}
-        checkpoint = torch.load(CHECKPOINT_PATH, map_location=map_location)
-        load_states_from_checkpoint(checkpoint, model, optimizer, scaler)
-        print(f"finished {batch_path}")
+        checkpoint = torch.load(args.checkpoint_path + f"_last.ckpt", map_location=map_location)
+        load_states_from_checkpoint(checkpoint, model, optimizer, scaler, lr_scheduler)
 
-        # if (i + 1) == (len(local_batches) // args.epochs):
-        #     if rank == 0:
-        #         print(f"Finished epoch {epoch}")
-        #         epoch += 1
-        #         evaluate_dir(model.module, args.val_dir + "*.pt", args.batch_size, set="val", writer=writer, global_step=global_step, seq_len=args.bptt, device=device)
-        #         evaluate_dir(model.module, args.test_dir+ "*.pt", args.batch_size, set="test", writer=writer, global_step=global_step, seq_len=args.bptt, device=device)
-        #         model.module.save(args.checkpoint_path + f"_{global_step}")
-
-        #     dist.barrier()
-        #     args.base_lr /= 2
+        if global_step >= args.max_steps:
+            break
 
 
 def spmd_main(local_rank, args):
@@ -147,7 +150,6 @@ def spmd_main(local_rank, args):
     try:
         process_rank = local_rank + args.rank
         dist.init_process_group(backend="nccl",
-                                init_method="file://" + args.dist_file, 
                                 rank=process_rank, 
                                 world_size=args.world_size,
                                 timeout=datetime.timedelta(0, 60 * 60 *2))
@@ -177,15 +179,16 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=123)
 
     parser.add_argument("--base_lr", type=float, default=2e-3)
-    parser.add_argument("--optimizer", type=str, default="fused")
     parser.add_argument("--clip_value", type=float, default=0.1)
-    parser.add_argument("--bptt", type=int, default=768)
+    parser.add_argument("--bptt", type=int, default=1024)
     parser.add_argument("--warmup", type=int, default=1000)
     parser.add_argument("--batch_size", type=int, default=32)
 
     parser.add_argument("--evaluate_each", type=int, default=5)
-    parser.add_argument("--log_interval", type=int, default=50)
+    parser.add_argument("--log_interval", type=int, default=200)
     parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--max_steps", type=int, default=1)
+    parser.add_argument("--no_amp", action="store_false")
 
     parser.add_argument("--train_dir", type=str, default="/userfiles/asafaya19/pile/train/")
     parser.add_argument("--val_dir", type=str, default="/userfiles/asafaya19/pile/val/")

@@ -69,7 +69,7 @@ class LSTMBlock(nn.Module):
         # lstm output dropout
         if self.dropout is not None:
             h = self.dropout(h)
-
+        
         new_memory = []
         if self.attn is not None:
             h = self.ln_h(h)
@@ -102,7 +102,7 @@ class LSTMBlock(nn.Module):
 
             # attention residual
             h = h + attn_output
-
+        
         # feed forward
         h = self.ln_fforward(h)
         h = h + self.fforward(h) + input

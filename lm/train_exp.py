@@ -30,13 +30,15 @@ class DummyDDPWrapper(nn.Module):
         yield
 
 
-def load_states_from_checkpoint(checkpoint, model=None, optimizer=None, scaler=None):
+def load_states_from_checkpoint(checkpoint, model=None, optimizer=None, scaler=None, scheduler=None):
     if model is not None and "model" in checkpoint:
         model.load_state_dict(checkpoint["model"])
     if optimizer is not None and "optimizer" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer"])
     if scaler is not None and "scaler" in checkpoint:
         scaler.load_state_dict(checkpoint["scaler"])
+    if scheduler is not None and "scheduler" in checkpoint:
+        scheduler.load_state_dict(checkpoint["scheduler"])
 
 
 def evaluate(model, batch_path, use_amp=False, seq_len=1024):
@@ -51,7 +53,7 @@ def evaluate(model, batch_path, use_amp=False, seq_len=1024):
         for inp_ids, attn_masks in eval_data:
             
             hidden, mems = None, None
-            for i in range(0, inp_ids.size(0), seq_len):
+            for i in range(0, inp_ids.size(0) - 1, seq_len):
 
                 if inp_ids.size(0) < ( 1 + i + seq_len ):
                     step_len = inp_ids.size(0) - i - 1
@@ -99,16 +101,12 @@ def evaluate_dir(model, batch_dir, set="val", writer=None, global_step=0, seq_le
     return loss
 
 
-def warmup_lr(optimizer, lr, ratio):
-    for param_group in optimizer.param_groups:        
-        param_group['lr'] = lr * ratio
-
-
 def train(
         model,
         batch_path,
         optimizer,
         scaler,
+        val_dir=None,
         global_step=0,
         eval_steps=1e10,
         max_steps=1e10,
@@ -121,7 +119,9 @@ def train(
         use_amp=True,
         lr_scheduler=None,
         device=torch.device("cuda"),
-        checkpoint_path="shalstm"
+        checkpoint_path="shalstm",
+        rank=0,
+        dist=None
         ):
 
     train_data = torch.load(batch_path)
@@ -129,13 +129,10 @@ def train(
     model.train()
     losses, grad_history = [], []
     total_loss, minibatch, obs_grad_norm = 0, 0, 0
-    best_loss = 1e3
     with model.join():
         for inp_ids, attn_masks in train_data:
-
             hidden, mems = None, None
             for i in range(0, inp_ids.size(0) - 1, seq_len):
-
                 # get minibatch
                 if inp_ids.size(0) < ( 1 + i + seq_len ):
                     step_len = inp_ids.size(0) - i - 1
@@ -177,16 +174,21 @@ def train(
 
                 # update weights
                 scaler.step(optimizer)
-                
+
                 # if lr scheduler is used
                 if lr_scheduler is not None:
                     lr_scheduler.step()
 
                 # update scaler's scale value and other parameters
                 scaler.update()
+                if scaler.get_scale() > 2.0**18:
+                    scaler.update(2.0**18)
 
                 total_loss += loss.item()
-                if minibatch % log_interval == 0 and minibatch > 0:
+                minibatch += 1
+                global_step += 1
+
+                if minibatch % log_interval == 0 and rank == 0:
 
                     cur_loss = min(total_loss / log_interval, 1e1)
                     obs_grad_norm /= log_interval
@@ -206,24 +208,8 @@ def train(
                     total_loss = 0
                     obs_grad_norm = 0
 
-                minibatch += 1
-                global_step += 1
-    
-                if global_step % eval_steps == 0 or global_step >= max_steps:
-                    eval_loss = evaluate_dir(model.module, args.val_dir, set="val", writer=writer, global_step=global_step, seq_len=args.bptt, use_amp=use_amp)
-                    model.train()
-
-                    checkpoint = {
-                        'model': model.module.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'scaler': scaler.state_dict()
-                    }
-
-                    torch.save(checkpoint, checkpoint_path + f"_{global_step}.ckpt")
-                    torch.save(checkpoint, checkpoint_path + f"_last.ckpt")
-
-                    if global_step >= max_steps:
-                        return global_step
+                if global_step >= max_steps:
+                    return global_step
 
     return global_step
 
@@ -237,7 +223,6 @@ def main(args):
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-
     if args.device == "cuda":
         torch.cuda.manual_seed(args.seed)
 
@@ -246,11 +231,10 @@ def main(args):
     # start from checkpoint
     best_loss, global_step = 1e3, args.global_step
     if args.load_checkpoint:
-        model.load(args.load_checkpoint)
+        load_states_from_checkpoint(torch.load(args.load_checkpoint), model, optimizer, scaler, lr_scheduler)
         print(f"Loaded checkpoint model", args.load_checkpoint)
-
-    print("No of parameters", sum(p.numel() for p in model.parameters()))
         
+    print("No of parameters", sum(p.numel() for p in model.parameters()))
     model = DummyDDPWrapper(model)
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     optimizer = MinTrustLamb(model.parameters(), lr=args.base_lr)
@@ -300,7 +284,8 @@ def main(args):
     checkpoint = {
         'model': model.module.state_dict(),
         'optimizer': optimizer.state_dict(),
-        'scaler': scaler.state_dict()
+        'scaler': scaler.state_dict(),
+        'scheduler': lr_scheduler.state_dict()
     }
 
     torch.save(checkpoint, args.checkpoint_path + f"_last.ckpt")

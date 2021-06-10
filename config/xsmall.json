@@ -7,6 +7,6 @@
     "dropouto": 0.1,
     "dropouth": 0.1,
     "vocab_size": 16384,
-    "attn_layers": [3],
+    "attn_layers": [1, 2, 3, 4],
     "rnn_type": "lstm"
 }

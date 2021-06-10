@@ -218,6 +218,7 @@ def train(
                     writer.add_scalar('training/ppl', ppl, global_step + shift)
                     writer.add_scalar('training/bpt', bpt, global_step + shift)
                     writer.add_scalar('training/lr', lr, global_step + shift)
+                print(f'| global step {global_step:0>6} |  lr {lr:5.5f} | loss {cur_loss:5.2f} | gnorm {obs_grad_norm:8.2f} |')
 
                 total_loss = 0
 
@@ -258,9 +259,9 @@ def main(args):
     model_config = json.loads(open(args.model_config).read())
     
     model_config["vocab_size"] = args.vocab_size
-    model_config["attn_layers"] = [ int(i) for i in args.attn_layers.split(",") ]
-    model_config["no_layers"] = args.no_layers
-    model_config["rnn_type"] = args.rnn
+#     model_config["attn_layers"] = [ int(i) for i in args.attn_layers.split(",") ]
+#     model_config["no_layers"] = args.no_layers
+#     model_config["rnn_type"] = args.rnn
 
     model = SHALSTM(model_config, device=device)
 
