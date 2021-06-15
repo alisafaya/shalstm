@@ -129,7 +129,7 @@ def train(
     model.train()
     losses, grad_history = [], []
     total_loss, minibatch, obs_grad_norm = 0, 0, 0
-    with model.join():
+    with model.join(divide_by_initial_world_size=False):
         for inp_ids, attn_masks in train_data:
             hidden, mems = None, None
             for i in range(0, inp_ids.size(0) - 1, seq_len):
@@ -138,6 +138,9 @@ def train(
                     step_len = inp_ids.size(0) - i - 1
                 else:
                     step_len = seq_len
+                    
+                if step_len < 5:
+                    continue
 
                 data = inp_ids[i:i+step_len].long()
                 attention_mask = attn_masks[i:i+step_len].long()
@@ -148,7 +151,7 @@ def train(
 
                 # calculate loss
                 with torch.cuda.amp.autocast(enabled=use_amp):
-                    loss, output, hidden, mems = model(data, hidden=hidden, mems=mems, targets=targets, attention_mask=attention_mask)
+                    loss, output, hidden, mems = model(data, hidden=hidden, mems=mems, targets=targets, attention_mask=attention_mask, scale_loss_bptt=True)
 
                 # do backward pass
                 scaler.scale(loss).backward()
@@ -184,7 +187,7 @@ def train(
                 if scaler.get_scale() > 2.0**18:
                     scaler.update(2.0**18)
 
-                total_loss += loss.item()
+                total_loss += loss.item() / targets.view(-1).shape[0]
                 minibatch += 1
                 global_step += 1
 

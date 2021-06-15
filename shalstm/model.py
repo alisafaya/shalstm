@@ -98,7 +98,7 @@ class SHALSTM(nn.Module):
 
         return False 
 
-    def forward(self, x, hidden=None, mems=None, targets=None, attention_mask=None):
+    def forward(self, x, hidden=None, mems=None, targets=None, attention_mask=None, scale_loss_bptt=False):
         """ Input has shape [seq length, batch] """
         x = x.to(self.device)
         seq_len, batch_size = x.shape
@@ -151,10 +151,13 @@ class SHALSTM(nn.Module):
         
         # final dropout
         h = self.odrop(h)
-
         if targets is not None:
             # calculate loss targets are provided
-            loss = self.splitloss(h.view(-1, self.embed_size), targets.to(self.device).view(-1)).loss
+            if scale_loss_bptt:
+                loss = self.splitloss(h.view(-1, self.embed_size), targets.to(self.device).view(-1), reduce_fn=torch.sum).loss
+            else:
+                loss = self.splitloss(h.view(-1, self.embed_size), targets.to(self.device).view(-1)).loss
+
             return loss, h, new_hidden, new_mems
         else:
             # calculate predictions

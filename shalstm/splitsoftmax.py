@@ -83,7 +83,7 @@ class SplitSoftmaxWithLoss(Module):
     def reset_parameters(self, param) -> None:
         init.kaiming_uniform_(param, a=math.sqrt(5))
 
-    def forward(self, input: Tensor, target: Tensor) -> _ASMoutput:
+    def forward(self, input: Tensor, target: Tensor, reduce_fn=torch.mean) -> _ASMoutput:
         
         if input.size(0) != target.size(0):
             raise RuntimeError('Input and target should have the same size '
@@ -146,7 +146,7 @@ class SplitSoftmaxWithLoss(Module):
                                                      target.max().item()))
 
         output += head_logprob.gather(1, gather_inds.unsqueeze(1)).squeeze()
-        loss = (-output).mean()
+        loss = reduce_fn(-output)
 
         return _ASMoutput(output, loss)
 
