@@ -164,7 +164,7 @@ def train(
                 scaler.unscale_(optimizer)
 
                 # calculate dynamic gradient clip threshold
-                obs_grad_norm += model.module._get_grad_norm()
+                obs_grad_norm += float(model.module._get_grad_norm()) / step_len
 
                 if not static_clip:
                     grad_history.append(obs_grad_norm)
@@ -184,14 +184,14 @@ def train(
 
                 # update scaler's scale value and other parameters
                 scaler.update()
-                if scaler.get_scale() > 2.0**18:
+                if scaler.get_scale() > 2.0**17:
                     scaler.update(2.0**18)
 
-                total_loss += loss.item() / targets.view(-1).shape[0]
+                total_loss += loss.item() / step_len
                 minibatch += 1
                 global_step += 1
 
-                if minibatch % log_interval == 0 and rank == 0:
+                if minibatch % log_interval == 0:
 
                     cur_loss = min(total_loss / log_interval, 1e1)
                     obs_grad_norm /= log_interval
@@ -199,7 +199,7 @@ def train(
                     ppl = math.exp(cur_loss)
                     bpt = cur_loss / math.log(2)
 
-                    if writer is not None:
+                    if writer is not None and rank == 0:
                         writer.add_scalar('training/loss', cur_loss, global_step)
                         writer.add_scalar('training/gnorm', obs_grad_norm, global_step)
                         writer.add_scalar('training/scale', scaler.get_scale(), global_step)
@@ -207,7 +207,7 @@ def train(
                         writer.add_scalar('training/bpt', bpt, global_step)
                         writer.add_scalar('training/lr', lr, global_step)
 
-                    print(f'| global step {global_step:0>6} |  lr {lr:5.5f} | loss {cur_loss:5.2f} | gnorm {obs_grad_norm:8.2f} |')
+                    print(f'| rank {rank} | global step {global_step:0>6} |  lr {lr:5.5f} | loss {cur_loss:5.2f} | gnorm {obs_grad_norm:8.2f} |')
                     total_loss = 0
                     obs_grad_norm = 0
 

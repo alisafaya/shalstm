@@ -1,11 +1,11 @@
 exp_dir=/kuacc/users/asafaya19/shalstm-exp-data/shalstm-data
 data_dir=$exp_dir/full-data-bin
-ckpt_dir=$exp_dir/4_v100_5_epoch/shalstm
-run_dir=$exp_dir/runs/4_v100_5_epoch/
+ckpt_dir=$exp_dir/4_v100_5_epoch_sum_loss/shalstm
+run_dir=$exp_dir/runs/4_v100_5_epoch_sum_loss/
 
 total_steps=1000000
 warmup=5000
-epochs=4
+epochs=5
 eval_steps=160000
 model_config=config/small_exp.json
 
@@ -20,7 +20,7 @@ RANK=0
 nvidia-smi | grep 'python' | awk '{ print $5 }' | xargs -n1 kill -9
 [ -e $DIST_FILE ] && rm $DIST_FILE
 
-export OMP_NUM_THREADS=4 # nthreads / ngpus
+export OMP_NUM_THREADS=3 # nthreads / ngpus
 export NCCL_BLOCKING_WAIT=1
 
 ## run
@@ -45,5 +45,4 @@ python -m torch.distributed.launch \
     --max_steps $total_steps \
     --evaluate_each $eval_steps \
     --epochs $epochs \
-    --bptt 1024 \
-    --load_checkpoint $exp_dir/4_v100_5_epoch/shalstm_last.ckpt
+    --bptt 1024

@@ -154,7 +154,8 @@ class SHALSTM(nn.Module):
         if targets is not None:
             # calculate loss targets are provided
             if scale_loss_bptt:
-                loss = self.splitloss(h.view(-1, self.embed_size), targets.to(self.device).view(-1), reduce_fn=torch.sum).loss
+                loss = self.splitloss(h.view(-1, self.embed_size), targets.to(self.device).view(-1), reduce_fn=lambda x: x).loss
+                loss = loss.view(x.size(0), -1).mean(1).sum() # mean over batch dim only
             else:
                 loss = self.splitloss(h.view(-1, self.embed_size), targets.to(self.device).view(-1)).loss
 
