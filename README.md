@@ -34,5 +34,7 @@ print(decoded[0])
 print("Gold answer: She's moody, and they have financial problems.")
 ```
 
-### SHALSTM for Classification
+### SHALSTM for Sequence Classification
+
+### SHALSTM for Language Generation
 
