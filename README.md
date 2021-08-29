@@ -38,3 +38,6 @@ print("Gold answer: She's moody, and they have financial problems.")
 
 ### SHALSTM for Language Generation
 
+```shell
+python -m shalstm.lm.generate --model pretrained_model_dir/ --prompt 'some prompt' --device cuda --use-sampling --eos-id 0 --max-length 256
+```
