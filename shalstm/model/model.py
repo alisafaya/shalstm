@@ -158,7 +158,6 @@ class SHALSTM(nn.Module):
                 loss = loss.view(x.size(0), -1).mean(1).sum() # mean over batch dim only
             else:
                 loss = self.splitloss(h.view(-1, self.embed_size), targets.to(self.device).view(-1)).loss
-
             return loss, h, new_hidden, new_mems
         else:
             # calculate predictions
@@ -166,12 +165,12 @@ class SHALSTM(nn.Module):
             output = output.view(x.size(0), -1)
             return output, h, new_hidden, new_mems
 
-    def generate(self, eos_id=2, initial_prompt=None, max_length=1024, use_sampling=True, top_p=0.95, temperature=1.0):
+    def generate(self, eos_id=2, initial_prompt=None, max_length=1024, use_sampling=True, top_p=0.95, top_k=100, temperature=1.0):
         """ initial_prompt sequence has shape [seq length] """
 
-        sequence = [] if initial_prompt is None else initial_prompt
+        sequence = [] if initial_prompt is None else list(initial_prompt)
         if initial_prompt is not None:
-            prompt = initial_prompt
+            prompt = list(initial_prompt)
         else:
             prompt = [eos_id,]
         prompt = torch.tensor(prompt, dtype=torch.long).view(-1, 1)
@@ -179,16 +178,15 @@ class SHALSTM(nn.Module):
         self.eval()
         hidden, mems = None, None
         with torch.no_grad():
-            if initial_prompt is not None:
-                output, h,  hidden, mems = self(prompt[:-1], hidden=hidden, mems=mems)
+            if initial_prompt is not None and len(prompt) > 1:
+                output, h, hidden, mems = self(prompt[:-1], hidden=hidden, mems=mems)
                 prompt = prompt[-1:]
 
             for i in range(max_length):
-                
                 output, h, hidden, mems = self(prompt, hidden=hidden, mems=mems)
                 if use_sampling:
-                    token_weights = top_k_top_p_filtering(torch.exp(output.view(-1)) / temperature, top_p=top_p, filter_value=0.0)
-                    output_idx = torch.multinomial(token_weights, num_samples=1)[0]
+                    token_weights = top_k_top_p_filtering(output.view(-1) / temperature, top_p=top_p, top_k=top_k)
+                    output_idx = torch.multinomial(F.softmax(token_weights, dim=-1).squeeze(), num_samples=1)[0]
                 else:
                     output_idx = torch.argmax(output.view(-1))
 

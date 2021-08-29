@@ -1,6 +1,6 @@
-# https://gist.github.com/thomwolf/1a5a29f6962089e871b94cbd09daf317
 
 import torch
+import torch.nn.functional as F
 
 def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, filter_value=-float('Inf')):
     """ Filter a distribution of logits using top-k and/or nucleus (top-p) filtering
@@ -12,8 +12,8 @@ def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, filter_value=-float('Inf')
         From: https://gist.github.com/thomwolf/1a5a29f6962089e871b94cbd09daf317
     """
     assert logits.dim() == 1  # batch size 1 for now - could be updated for more but the code would be less clear
+    top_k = int(top_k)
     top_k = min(top_k, logits.size(-1))  # Safety check
-
     if top_k > 0:
         # Remove all tokens with a probability less than the last token of the top-k
         indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
@@ -21,7 +21,7 @@ def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, filter_value=-float('Inf')
 
     if top_p > 0.0:
         sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-        cumulative_probs = torch.cumsum(sorted_logits, dim=-1)
+        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
 
         # Remove tokens with cumulative probability above the threshold
         sorted_indices_to_remove = cumulative_probs > top_p

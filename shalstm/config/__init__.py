@@ -1,5 +1,4 @@
 # Check which configuration is used for base and small models trained on oracle HPC.
-
 BASE_EXP = {
     "embed_size": 1024,
     "memory_size": 4096,

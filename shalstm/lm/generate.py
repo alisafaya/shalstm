@@ -1,5 +1,3 @@
-# coding: utf-8
-
 import argparse
 
 import torch
@@ -16,13 +14,13 @@ def main(args):
     model = SHALSTM.from_pretrained(args.model, device=device)
 
     prompt = None
-
     if args.prompt_file:
         prompt = tokenizer.encode(open(args.prompt_file).read(), add_special_tokens=False)
     elif args.prompt:
         prompt = tokenizer.encode(args.prompt, add_special_tokens=False)
 
-    sequence = model.generate(eos_id=args.eos_id, initial_prompt=prompt, max_length=args.max_length, use_sampling=args.use_sampling, temperature=args.temperature, top_p=args.top_p)
+    print("Encoded", len(prompt), "Tokens")
+    sequence = model.generate(eos_id=args.eos_id, initial_prompt=prompt, max_length=args.max_length, use_sampling=args.use_sampling, temperature=args.temperature, top_p=args.top_p, top_k=args.top_k)
     print(tokenizer.decode(sequence))
 
 if __name__ == "__main__":
@@ -33,7 +31,8 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=1.0)
-    parser.add_argument("--top-p", type=float, default=0.98)
+    parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--top-k", type=int, default=100)
     parser.add_argument("--use-sampling", action="store_true")
     parser.add_argument("--prompt", type=str, default="")
     parser.add_argument("--prompt-file", type=str, default="")

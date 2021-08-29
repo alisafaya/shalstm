@@ -280,9 +280,9 @@ if __name__ == '__main__':
             print('Cross Entropy', F.cross_entropy(F.linear(y, embed.weight, crit.bias), x.view(N)).item())
 
         print('Log prob')
-        print(c.output)
 
         print(crit.log_prob(y)[torch.arange(y.size(0)), x.view(-1)])
+        print('Cross Entropy log probs: ', F.log_softmax(F.linear(y, embed.weight, crit.bias), dim=1)[torch.arange(y.size(0)), x.view(-1)])
 
         optimizer.zero_grad()
         c.loss.backward()
