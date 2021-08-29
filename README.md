@@ -33,3 +33,8 @@ decoded = [ s.split("</s>")[0] for s in decoded ]
 print(decoded[0])
 print("Gold answer: She's moody, and they have financial problems.")
 ```
+
+### SHALSTM for Sequence Classification
+
+### SHALSTM for Language Generation
+
