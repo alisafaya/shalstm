@@ -63,6 +63,7 @@ def run_proc(local_rank, args):
     if rank == 0:
         print(args)
         torch.save(model.state_dict(), CHECKPOINT_PATH)
+        print("No of parameters", sum(p.numel() for p in model.parameters()))
         print(f"[{os.getpid()}] Saved initialized model.")
 
     dist.barrier()

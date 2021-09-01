@@ -198,23 +198,22 @@ class SHALSTM(nn.Module):
         return sequence
 
     def save(self, path):
-        if os.path.exists(path):
-            
-            # move state dict to cpu
-            state_dict = self.state_dict()
-            for key, value in state_dict.items():
-                state_dict[key] = value.cpu()
+        if not os.path.exists(path):
+            os.mkdir(path)
 
-            # save config
-            with open(os.path.join(path, "config.json"), "w") as fo:
-                fo.write(json.dumps(self.get_config(), indent=4))
-            
-            # save weights
-            torch.save(state_dict, os.path.join(path, "model.pt"))
+        # move state dict to cpu
+        state_dict = self.state_dict()
+        for key, value in state_dict.items():
+            state_dict[key] = value.cpu()
 
-            return os.path.join(path, "config.json"), os.path.join(path, "model.pt")
-        else:
-            raise FileNotFoundError(f"Given directory doesn't exist: {path}")
+        # save config
+        with open(os.path.join(path, "config.json"), "w") as fo:
+            fo.write(json.dumps(self.get_config(), indent=4))
+        
+        # save weights
+        torch.save(state_dict, os.path.join(path, "model.pt"))
+
+        return os.path.join(path, "config.json"), os.path.join(path, "model.pt")
 
     @classmethod
     def from_pretrained(cls, path, device=torch.device("cpu")):
