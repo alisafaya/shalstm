@@ -49,15 +49,16 @@ class SplitSoftmaxWithLoss(Module):
 
         cutoffs = list(cutoffs)
 
-        if (cutoffs != sorted(cutoffs)) \
-                or (min(cutoffs) <= 0) \
-                or (max(cutoffs) > (n_classes - 1)) \
-                or (len(set(cutoffs)) != len(cutoffs)) \
-                or any([int(c) != c for c in cutoffs]):
+        if len(cutoffs) > 0: 
+            if (cutoffs != sorted(cutoffs)) \
+                    or (min(cutoffs) <= 0) \
+                    or (max(cutoffs) > (n_classes - 1)) \
+                    or (len(set(cutoffs)) != len(cutoffs)) \
+                    or any([int(c) != c for c in cutoffs]):
 
-            raise ValueError("cutoffs should be a sequence of unique, positive "
-                             "integers sorted in an increasing order, where "
-                             "each value is between 1 and n_classes-1")
+                raise ValueError("cutoffs should be a sequence of unique, positive "
+                                "integers sorted in an increasing order, where "
+                                "each value is between 1 and n_classes-1")
 
         self.in_features = in_features
         self.n_classes = n_classes
@@ -261,6 +262,7 @@ if __name__ == '__main__':
     # Cutoffs list calculation could be better than this
     start = 4 + int(np.ceil(np.log2(V / 8) / 2))
     cutoffs = [ 2**x for x in range(start, start + 5, 2) if V > 2**x ]
+    cutoffs = []
     crit = SplitSoftmaxWithLoss(H, V, cutoffs, embed.weight)
 
     print(V)
@@ -282,7 +284,7 @@ if __name__ == '__main__':
         print('Log prob')
 
         print(crit.log_prob(y)[torch.arange(y.size(0)), x.view(-1)])
-        print('Cross Entropy log probs: ', F.log_softmax(F.linear(y, embed.weight, crit.bias), dim=1)[torch.arange(y.size(0)), x.view(-1)])
+        print(F.log_softmax(F.linear(y, embed.weight, crit.bias), dim=1)[torch.arange(y.size(0)), x.view(-1)])
 
         optimizer.zero_grad()
         c.loss.backward()
