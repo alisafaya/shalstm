@@ -170,7 +170,7 @@ class SHALSTM(nn.Module):
 
         sequence = [] if initial_prompt is None else list(initial_prompt)
         if initial_prompt is not None:
-            prompt = list(initial_prompt)
+            prompt = [eos_id,] + initial_prompt
         else:
             prompt = [eos_id,]
         prompt = torch.tensor(prompt, dtype=torch.long).view(-1, 1)
@@ -185,8 +185,8 @@ class SHALSTM(nn.Module):
             for i in range(max_length):
                 output, h, hidden, mems = self(prompt, hidden=hidden, mems=mems)
                 if use_sampling:
-                    token_weights = top_k_top_p_filtering(output.view(-1), top_p=top_p, top_k=top_k)
-                    output_idx = torch.multinomial(F.softmax(token_weights / temperature, dim=-1).squeeze(), num_samples=1)[0]
+                    token_weights = top_k_top_p_filtering(output.view(-1) / temperature, top_p=top_p, top_k=top_k)
+                    output_idx = torch.multinomial(F.softmax(token_weights, dim=-1).squeeze(), num_samples=1)[0]
                 else:
                     output_idx = torch.argmax(output.view(-1))
 

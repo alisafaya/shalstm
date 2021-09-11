@@ -47,6 +47,7 @@ class Attention(nn.Module):
         super().__init__()
 
         self.hidden_size = hidden_size
+        self.scale_val = math.sqrt(hidden_size)
 
         # gates
         self.query_gate = nn.Parameter(torch.zeros(size=(1, 1, hidden_size), dtype=torch.float))
@@ -70,7 +71,7 @@ class Attention(nn.Module):
         batch_size, heads, query_len, hidden_size = query.size()
         key_len = key.size(2)
         
-        attention_scores = torch.matmul(query / math.sqrt(hidden_size), key.transpose(-1, -2).contiguous())
+        attention_scores = torch.matmul(query / self.scale_val, key.transpose(-1, -2).contiguous())
 
         if attn_mask is not None:
             if attn_mask.dim() == 2:
