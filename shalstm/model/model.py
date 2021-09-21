@@ -148,7 +148,7 @@ class SHALSTM(nn.Module):
             h, new_mem, new_hid = block(h, attn_mask, self.memory_size, memory=mem, hidden=hid)
             new_hidden.append(new_hid)
             new_mems.append(new_mem)
-        
+
         # final dropout
         h = self.odrop(h)
         if targets is not None:
@@ -221,7 +221,7 @@ class SHALSTM(nn.Module):
         if os.path.exists(path):
             config = json.load(open(os.path.join(path, "config.json")))
             model = cls(config, device=device)
-            model.load_state_dict(torch.load(os.path.join(path, "model.pt")))
+            model.load_state_dict(torch.load(os.path.join(path, "model.pt")), strict=False)
             model.to(device)
             return model
         else:

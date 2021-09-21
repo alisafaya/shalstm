@@ -77,7 +77,7 @@ def run_proc(local_rank, args):
                                                     num_warmup_steps = args.warmup,
                                                     num_training_steps = args.max_steps,
                                                     num_cycles = 0.25
-                                )
+                                                )
     # start from checkpoint
     if args.load_checkpoint:
         load_states_from_checkpoint(torch.load(args.load_checkpoint, map_location=map_location), model, optimizer, scaler, lr_scheduler)
@@ -120,8 +120,6 @@ def run_proc(local_rank, args):
             )
 
             if local_rank == 0:
-                print(f"Finished epoch = {epoch}")
-
                 checkpoint = {
                     'model': model.state_dict(),
                     'optimizer': optimizer.state_dict(),
@@ -134,6 +132,7 @@ def run_proc(local_rank, args):
                 evaluate_dir(model.module, args.val_dir, set="val", writer=writer, global_step=global_step, seq_len=args.bptt, use_amp=use_amp)
 
             # resync model, optimizer, scaler on all gpus (just to make sure)
+            print(f"Finished {batch_path}")
             dist.barrier()
             map_location = {'cuda:%d' % 0: 'cuda:%d' % local_rank}
             checkpoint = torch.load(args.checkpoint_path + f"_last.ckpt", map_location=map_location)

@@ -128,7 +128,7 @@ def train(
     model.train()
     losses, grad_history = [], []
     total_loss, minibatch, obs_grad_norm = 0, 0, 0
-    with model.join(divide_by_initial_world_size=False):
+    with model.join():
         for inp_ids, attn_masks in train_data:
             hidden, mems = None, None
             for i in range(0, inp_ids.size(0) - 1, seq_len):
@@ -137,8 +137,8 @@ def train(
                     step_len = inp_ids.size(0) - i - 1
                 else:
                     step_len = seq_len
-                    
-                if step_len < 5:
+
+                if step_len < 16:
                     continue
 
                 data = inp_ids[i:i+step_len].long()
@@ -150,20 +150,15 @@ def train(
 
                 # calculate loss
                 with torch.cuda.amp.autocast(enabled=use_amp):
-                    loss, output, hidden, mems = model(data, hidden=hidden, mems=mems, targets=targets, attention_mask=attention_mask, scale_loss_bptt=True)
+                    loss, output, hidden, mems = model(data, hidden=hidden, mems=mems, targets=targets, attention_mask=attention_mask)
 
                 # do backward pass
                 scaler.scale(loss).backward()
-
-                # debug step
-#                 if model.module._check_nan_grads():
-#                     print("NaN gradients detected, logging...")
-#                     print(f"i={i}, minibatch={minibatch}, batch_path={batch_path}, global_step={global_step}")
-
                 scaler.unscale_(optimizer)
 
                 # calculate dynamic gradient clip threshold
-                obs_grad_norm += float(model.module._get_grad_norm()) / step_len
+                _norm = float(model.module._get_grad_norm())
+                obs_grad_norm += _norm if math.isfinite(_norm) else 0.0
 
                 if not static_clip:
                     grad_history.append(obs_grad_norm)
@@ -186,7 +181,7 @@ def train(
                 if scaler.get_scale() > 2.0**17:
                     scaler.update(2.0**18)
 
-                total_loss += loss.item() / step_len
+                total_loss += loss.item()
                 minibatch += 1
                 global_step += 1
 
