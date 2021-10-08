@@ -19,9 +19,16 @@ class LSTMBlock(nn.Module):
         elif rnn == "gru":
             self.lstm = nn.GRU(input_size=input_size, hidden_size=input_size)
             self.rnn_init = nn.Parameter(torch.randn(1, 1, input_size) / math.sqrt(input_size))
+        elif rnn == "rnn":
+            self.lstm = nn.RNN(input_size=input_size, hidden_size=input_size)
+            self.rnn_init = nn.Parameter(torch.randn(1, 1, input_size) / math.sqrt(input_size))
         elif rnn == "sru":
             from sru import SRU
-            self.lstm = SRU(input_size=input_size, hidden_size=input_size, num_layers=2, amp_recurrence_fp16=True, layer_norm=True)
+            self.lstm = SRU(input_size=input_size, hidden_size=input_size, num_layers=2, dropout=0.2, layer_norm=False)
+            self.rnn_init = nn.Parameter(torch.randn(2, 1, input_size) / math.sqrt(input_size))
+        elif rnn == "ssru":
+            from ssru import SSRU
+            self.lstm = SSRU(input_size=input_size, hidden_size=input_size, num_layers=2, dropout=0.2, layer_norm=False)
             self.rnn_init = nn.Parameter(torch.randn(2, 1, input_size) / math.sqrt(input_size))
         else:
             raise TypeError("rnn type should be one of lstm, gru, sru")

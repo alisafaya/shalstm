@@ -220,16 +220,13 @@ def main(args):
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+
     if args.device == "cuda":
         torch.cuda.manual_seed(args.seed)
 
     model = SHALSTM(args.model_config, device=device)
 
-    # start from checkpoint
     best_loss, global_step = 1e3, args.global_step
-    if args.load_checkpoint:
-        load_states_from_checkpoint(torch.load(args.load_checkpoint), model, optimizer, scaler, lr_scheduler)
-        print(f"Loaded checkpoint model", args.load_checkpoint)
         
     print("No of parameters", sum(p.numel() for p in model.parameters()))
     model = DummyDDPWrapper(model)
@@ -238,8 +235,12 @@ def main(args):
     lr_scheduler = get_cosine_schedule_with_warmup(optimizer,
                                                     num_warmup_steps = args.warmup,
                                                     num_training_steps = args.max_steps,
-                                                    num_cycles = 0.35
+                                                    num_cycles = 0.45
                                                   )
+    if args.load_checkpoint:
+        load_states_from_checkpoint(torch.load(args.load_checkpoint), model, optimizer, scaler, lr_scheduler)
+        global_step = next(iter(optimizer.state.values()))["step"]
+        print(f"Loaded checkpoint model", args.load_checkpoint)
 
     writer = SummaryWriter(args.writer_dir)
 
@@ -274,19 +275,21 @@ def main(args):
         if global_step >= args.max_steps:
             break
         
+        checkpoint = {
+            'model': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'scaler': scaler.state_dict(),
+            'scheduler': lr_scheduler.state_dict()
+        }
+
+#         model.module.save(args.checkpoint_path + f"_{global_step}")
+        torch.save(checkpoint, args.checkpoint_path + "_last.ckpt")
+
+        evaluate_dir(model.module, args.val_dir, set="val", writer=writer, global_step=global_step, seq_len=args.bptt, use_amp=use_amp)
+
+        evaluate_dir(model.module, args.test_dir, set="test", writer=writer, global_step=global_step, seq_len=args.bptt, use_amp=use_amp)
+        
         print(f"Finished epoch {epoch}")
-
-    print("Starting Final Evaluation")
-
-    checkpoint = {
-        'model': model.module.state_dict(),
-        'optimizer': optimizer.state_dict(),
-        'scaler': scaler.state_dict(),
-        'scheduler': lr_scheduler.state_dict()
-    }
-
-    torch.save(checkpoint, args.checkpoint_path + f"_last.ckpt")
-    evaluate_dir(model.module, args.val_dir, set="val", writer=writer, global_step=global_step, seq_len=args.bptt, use_amp=use_amp)
 
 
 if __name__ == "__main__":
