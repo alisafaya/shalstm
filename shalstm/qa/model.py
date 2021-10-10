@@ -206,9 +206,3 @@ if __name__ == "__main__":
     
     print("Conditional generation")
     print(tokenizer.decode_batch(sequence.t().cpu().tolist()))
-
-# Assigning bigger loss to longer sequences
-
-#     In [54]: for x in attn_mask[0]:
-#     ...:     print("".join([ f"{y:10.1f}" for y in x.tolist()]))
-#     ...:

@@ -32,6 +32,8 @@ class SHALSTM(nn.Module):
         self.device = device
         self.to(device)
 
+        self.config = {}
+
     def init_weights(self, module):
         if isinstance(module, (nn.Linear, nn.Embedding)):
             module.weight.data.normal_(mean=0.0, std=0.1 / (self.embed_size ** 0.5))
@@ -162,10 +164,10 @@ class SHALSTM(nn.Module):
         else:
             # calculate predictions
             output = self.splitloss.log_prob(h.view(-1, self.embed_size))
-            output = output.view(x.size(0), -1)
+            output = output.view(*x.shape, -1)
             return output, h, new_hidden, new_mems
 
-    def generate(self, eos_id=2, initial_prompt=None, max_length=1024, use_sampling=True, top_p=0.95, top_k=100, temperature=1.0):
+    def decode(self, eos_id=2, initial_prompt=None, max_length=1024, use_sampling=True, top_p=0.95, top_k=100, temperature=1.0):
         """ initial_prompt sequence has shape [seq length] """
 
         sequence = [] if initial_prompt is None else list(initial_prompt)
@@ -212,7 +214,6 @@ class SHALSTM(nn.Module):
         
         # save weights
         torch.save(state_dict, os.path.join(path, "model.pt"))
-
         return os.path.join(path, "config.json"), os.path.join(path, "model.pt")
 
     @classmethod
