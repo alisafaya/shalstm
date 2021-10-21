@@ -20,5 +20,5 @@ class SHALSTMforCausalGeneration(SHALSTM, GenerationMixin):
         self.config = PretrainedConfig()
 
     def forward(self, **kwargs):
-        output, h, new_hidden, new_mems = super().forward(kwargs['input_ids'].t(), attention_mask=kwargs.pop('attention_mask', None))
+        output, _, _, _ = super().forward(kwargs['input_ids'].t(), attention_mask=kwargs.pop('attention_mask', None))
         return _output(output.permute(1, 0, 2))
